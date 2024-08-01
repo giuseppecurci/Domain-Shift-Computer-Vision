@@ -3,6 +3,7 @@ import boto3 # read and write for AWS buckets
 from io import BytesIO
 from pathlib import Path
 from PIL import Image
+import torch
 
 class S3ImageFolder(Dataset):
     def __init__(self, root, transform=None):
@@ -67,3 +68,24 @@ class S3ImageFolder(Dataset):
             raise RuntimeError(f"Error loading image at index {idx}: {str(e)}")
 
         return img, self.class_to_idx[label]
+
+def get_data(batch_size, img_root, seed, transform = None):
+
+    # Load data
+    data = S3ImageFolder(root=img_root, transform=transform)
+    
+    # Create train and test splits (80/20)
+    num_samples = len(data)
+    training_samples = int(num_samples * 0.8 + 1)
+    val_samples = int(num_samples * 0.1)
+    test_samples = num_samples - training_samples - val_samples
+
+    torch.manual_seed(seed)
+    training_data, val_data, test_data = torch.utils.data.random_split(data, [training_samples, val_samples, test_samples])
+    
+    # Initialize dataloaders
+    train_loader = torch.utils.data.DataLoader(training_data, batch_size, shuffle=True, num_workers=4)
+    val_loader = torch.utils.data.DataLoader(val_data, batch_size, shuffle=False, num_workers=4)
+    test_loader = torch.utils.data.DataLoader(test_data, batch_size, shuffle=False, num_workers=4)
+
+    return train_loader, val_loader, test_loader

@@ -1,9 +1,11 @@
-import random 
 import torch
 import torchvision.transforms as T
 from utility.get_data import get_data, S3ImageFolder
 import torchvision.models as models
+import numpy as np
 
+import random 
+import time
 import os
 import json
 
@@ -18,7 +20,7 @@ class MEMO:
     def set_checkpoint(self, new_checkpoint_path):
         self.__checkpoint_path = new_checkpoint_path
 
-    def save_result(self, accuracy, seed_data, path_result, num_augmentations, augmentations, seed_augmentations, top_augmentations, MEMO, fine_tuned, lr_setting, weights_imagenet):
+    def save_result(self, accuracy, path_result, num_augmentations, augmentations, seed_augmentations, top_augmentations, MEMO, lr_setting, weights_imagenet):
         
         data = {
             "accuracy": accuracy,
@@ -35,7 +37,14 @@ class MEMO:
                 json.dump(data, json_file)
         except:
             print("Result were not saved")
-    
+
+    def marginal_entropy(self, outputs):
+        logits = outputs - outputs.logsumexp(dim=-1, keepdim=True)
+        avg_logits = logits.logsumexp(dim=0) - np.log(logits.shape[0])
+        min_real = torch.finfo(avg_logits.dtype).min
+        avg_logits = torch.clamp(avg_logits, min=min_real)
+        return -(avg_logits * torch.exp(avg_logits)).sum(dim=-1), avg_logits
+        
     def compute_entropy(self, probabilities):
         # Ensure probabilities are normalized (sum to 1)
         if not torch.isclose(probabilities.sum(), torch.tensor(1.0)):
@@ -57,6 +66,7 @@ class MEMO:
         return top_k_probabilities
 
     def get_MEMO_augmentations(self, input, augmentations, num_augmentations, seed_augmentations):
+        torch.manual_seed(seed_augmentations)
         random.seed(seed_augmentations)
         sampled_augmentations = random.sample(augmentations, num_augmentations)
         MEMO_augmentations = torch.zeros((num_augmentations, 3, 224, 224), device=self.__device)
@@ -87,9 +97,9 @@ class MEMO:
                 lr_optimizer.append({"params":params, "lr": lr_param_name[1]})
             other_params = [param for name, param in model.named_parameters() if name not in layers_groups]
             lr_optimizer.append({"params":other_params})
-            optimizer = self.__optimizer(lr_optimizer, lr = lr_setting[1], momentum = 0.9, weight_decay = 0)
+            optimizer = self.__optimizer(lr_optimizer, lr = lr_setting[1], weight_decay = 0)
         else:
-            optimizer = self.__optimizer(model.parameters(), lr = lr_setting[0], momentum = 0.9, weight_decay = 0)
+            optimizer = self.__optimizer(model.parameters(), lr = lr_setting[0], weight_decay = 0)
         return optimizer
 
     def get_imagenetA_masking(self):
@@ -106,6 +116,7 @@ class MEMO:
                   img_root,
                   weights_imagenet,
                   lr_setting,
+                  stable_entropy, 
                   dataset = "imagenetA",
                   batch_size = 64,
                   MEMO = True,
@@ -116,7 +127,7 @@ class MEMO:
         weights_name = str(weights_imagenet).split(".")[-1]
         name_result = f"model:{self.__model.__name__}_weights:{weights_name}_seed_aug:{seed_augmentations}_aug:{num_augmentations}_topaug:{top_augmentations}_MEMO:{MEMO}"
         path_result = os.path.join(self.__MEMO_path,name_result)
-        assert not os.path.exists(path_result),f"MEMO test already exists: {path_result}" 
+        assert not os.path.exists(path_result),f"MEMO test already exists: {path_result}"
         
         transform_loader = T.Compose([
             T.Resize((224, 224)),
@@ -131,6 +142,16 @@ class MEMO:
         test_loader = get_data(batch_size, img_root, transform = transform_loader, split_data=False)
             
         model = self.get_model(weights_imagenet)
+        optimizer = self.get_optimizer(model = model, lr_setting = lr_setting)
+
+        if MEMO:
+            MEMO_checkpoint_path = os.path.join(self.__MEMO_path,"checkpoint.pth")
+            torch.save({
+                'model': model.state_dict(),
+                'optimizer': optimizer.state_dict(),
+            }, MEMO_checkpoint_path)
+            MEMO_checkpoint = torch.load(MEMO_checkpoint_path)
+        
         if dataset == "imagenetA":
             imagenetA_masking = self.get_imagenetA_masking()
             
@@ -141,23 +162,45 @@ class MEMO:
             inputs, targets = inputs.to(self.__device), targets.to(self.__device)
             if MEMO:
                 for input, target in zip(inputs, targets):
-                    model = self.get_model(weights_imagenet)
+                    #start_get_model_optim = time.time()
+                    model.load_state_dict(MEMO_checkpoint['model'])
+                    optimizer.load_state_dict(MEMO_checkpoint['optimizer'])
+                    #end_get_model_optim = time.time()
+                    #print(f"Time to get model and optim: {end_get_model_optim - start_get_model_optim}")
+
+                    #start_aug = time.time()
                     MEMO_augmentations = self.get_MEMO_augmentations(input, augmentations, num_augmentations, seed_augmentations)
-                    optimizer = self.get_optimizer(model = model, lr_setting = lr_setting)
+                    #end_aug = time.time()
+                    #print(f"Time augmentations: {end_aug - start_aug}")
+
+                    optimizer.zero_grad()
                     logits = model(MEMO_augmentations)
                     logits = logits[:, imagenetA_masking]
-                    probab_augmentations = torch.softmax(logits, dim=1)
-                    if top_augmentations:
-                        probab_augmentations = self.get_best_augmentations(probab_augmentations, top_augmentations)
-                    marginal_output_distribution = torch.mean(probab_augmentations, dim=0)
-                    marginal_loss = self.compute_entropy(marginal_output_distribution)
+
+                    #start_entropy = time.time()
+                    if stable_entropy:
+                        marginal_loss, avg_logits = self.marginal_entropy(logits)
+                    else:
+                        probab_augmentations = torch.softmax(logits, dim=1)
+                        if top_augmentations:
+                            probab_augmentations = self.get_best_augmentations(probab_augmentations, top_augmentations)
+                        marginal_output_distribution = torch.mean(probab_augmentations, dim=0)
+                        marginal_loss = self.compute_entropy(marginal_output_distribution)
+                    #end_entropy = time.time()
+                    #print(f"Time entropy: {end_aug - start_aug}")
+
+                    #start_memo_update = time.time()
                     marginal_loss.backward()
                     optimizer.step()
-                    optimizer.zero_grad()
-                    input = normalize_input(input)
-                    probab_pred = torch.softmax(model(input.unsqueeze(0)), dim=1)
-                    y_pred = probab_pred.argmax()
-                    cumulative_accuracy += int(target == y_pred)
+                    #end_memo_update = time.time()
+                    #print(f"Time MEMO update: {end_memo_update - start_memo_update}")
+
+                    with torch.no_grad():
+                        input = normalize_input(input)
+                        logits_input = model(input.unsqueeze(0))
+                        logits_input_masked = logits_input[:,imagenetA_masking]
+                        y_pred = logits_input_masked.argmax().item()
+                        cumulative_accuracy += int(target == y_pred)
             else:
                 with torch.no_grad():
                     inputs = normalize_input(inputs)

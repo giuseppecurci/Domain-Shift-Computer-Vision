@@ -8,26 +8,24 @@ import os
 import json
 
 class MEMO:
-    def __init__(self, model, optimizer, checkpoint_path, device):
+    def __init__(self, model, optimizer, exp_path, device):
         self.__model = model
         self.__optimizer = optimizer
-        self.__checkpoint_path = checkpoint_path
         self.__device = device
-        self.__MEMO_path = os.path.join(os.path.dirname(checkpoint_path), "MEMO")
+        self.__MEMO_path = os.path.join(exp_path, "MEMO")
         os.makedirs(self.__MEMO_path, exist_ok=True)
 
     def set_checkpoint(self, new_checkpoint_path):
         self.__checkpoint_path = new_checkpoint_path
 
-    def save_result(self, accuracy, seed_data, path_result, num_augmentations, augmentations, seed_augmentations, top_augmentations, MEMO, fine_tuned, lr_setting):
+    def save_result(self, accuracy, seed_data, path_result, num_augmentations, augmentations, seed_augmentations, top_augmentations, MEMO, fine_tuned, lr_setting, weights_imagenet):
         
         data = {
             "accuracy": accuracy,
-            "seed_data": seed_data,
             "top_augmentations" : top_augmentations,
             "use_MEMO" : MEMO,
-            "fine_tuned" : fine_tuned,
             "lr_setting" : lr_setting,
+            "weights_imagenet" : str(weights_imagenet),
             "num_augmentations" : num_augmentations,
             "seed_augmentations": seed_augmentations,
             "augmentations" : [str(augmentation) for augmentation in augmentations]
@@ -48,7 +46,7 @@ class MEMO:
         epsilon = 1e-10
         probabilities = torch.clamp(probabilities, min=epsilon)
         entropy = -torch.sum(probabilities * torch.log(probabilities))
-        
+     
         return entropy
 
     def get_best_augmentations(self, probabilities, top_k):
@@ -73,72 +71,82 @@ class MEMO:
             MEMO_augmentations[i] = augmented_input
         return MEMO_augmentations
 
-    def get_model(self, fine_tuned):
-        model = self.__model(weights="DEFAULT") # Imagenet1k weights
-        if fine_tuned:
-            checkpoint = torch.load(self.__checkpoint_path)
-            model.load_state_dict(checkpoint["model"])
-            for param in model.parameters():
-                param.requires_grad = False
-            for param in model.fc.parameters():
-                param.requires_grad = True
+    def get_model(self, weights_imagenet):
+        model = self.__model(weights=weights_imagenet)
         model.eval()
         model.to(self.__device)
         return model 
 
-    def get_optimizer(self, model, fine_tuned, lr_setting):
-        if fine_tuned: 
-            optimizer = self.__optimizer(model.parameters(), lr = 0.001)
-            checkpoint = torch.load(self.__checkpoint_path)
-            optimizer.load_state_dict(checkpoint["optimizer"])
-        else:
+    def get_optimizer(self, model, lr_setting):
+        if len(lr_setting) == 2:
             layers_groups = []
-            lr_base_optimizer = []
+            lr_optimizer = []
             for layers, lr_param_name in lr_setting[0].items():
                 layers_groups.extend(lr_param_name[0])
                 params = [param for name, param in model.named_parameters() if name in lr_param_name[0]]
-                lr_base_optimizer.append({"params":params, "lr": lr_param_name[1]})
-            optimizer = self.__optimizer(lr_base_optimizer, lr = lr_setting[1], momentum = 0.9, weight_decay = 0.005)
+                lr_optimizer.append({"params":params, "lr": lr_param_name[1]})
+            other_params = [param for name, param in model.named_parameters() if name not in layers_groups]
+            lr_optimizer.append({"params":other_params})
+            optimizer = self.__optimizer(lr_optimizer, lr = lr_setting[1], momentum = 0.9, weight_decay = 0)
+        else:
+            optimizer = self.__optimizer(models.resnet50().parameters(), lr = lr_setting, momentum = 0.9, weight_decay = 0)
         return optimizer
-        
+
+    def get_imagenetA_masking(self):
+        imagenetA_masking_path = "/home/sagemaker-user/Domain-Shift-Computer-Vision/MEMO/imagenetA_masking.json"
+        with open(imagenetA_masking_path, 'r') as json_file:
+            imagenetA_masking = json.load(json_file)
+        indices_in_1k = [int(k) for k in imagenetA_masking if imagenetA_masking[k] != -1]
+        return indices_in_1k
+
     def test_MEMO(self, 
                   augmentations, 
                   num_augmentations, 
-                  seed_augmentations, 
-                  seed_data, 
-                  batch_size, 
+                  seed_augmentations,  
                   img_root,
-                  fine_tuned = True,
-                  lr_setting = None,
+                  weights_imagenet,
+                  lr_setting,
+                  dataset = "imagenetA",
+                  batch_size = 64,
                   MEMO = True,
-                  top_augmentations = 0):
+                  top_augmentations = 0,
+                  verbose = True,
+                  log_interval = 1):
 
-        name_result = f"seed_data:{seed_data}_seed_aug:{seed_augmentations}_aug:{num_augmentations}_topaug:{top_augmentations}_MEMO:{MEMO}_finetuned:{fine_tuned}"
+        weights_name = str(weights_imagenet).split(".")[-1]
+        name_result = f"model:{self.__model.__name__}_weights:{weights_name}_seed_aug:{seed_augmentations}_aug:{num_augmentations}_topaug:{top_augmentations}_MEMO:{MEMO}"
         path_result = os.path.join(self.__MEMO_path,name_result)
         assert not os.path.exists(path_result),f"MEMO test already exists: {path_result}" 
-        if not fine_tuned: assert lr_setting, "Fine tuned is True, but no lr_setting were provided for the non-fine tuned model's optimizer"
         
         transform_loader = T.Compose([
             T.Resize((224, 224)),
             T.ToTensor()
         ])
 
-        if fine_tuned:
-            _, _, test_loader = get_data(batch_size, img_root, transform = transform_loader, seed = seed_data, split_data=True)
-        else:
-            test_loader = get_data(batch_size, img_root, transform = transform_loader, seed = seed_data, split_data=False)
+        # to use after
+        normalize_input  = T.Compose([
+                        T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+                    ])
+        
+        test_loader = get_data(batch_size, img_root, transform = transform_loader, split_data=False)
+            
+        model = self.get_model(weights_imagenet)
+        if dataset == "imagenetA":
+            imagenetA_masking = self.get_imagenetA_masking()
             
         samples = 0.0
         cumulative_accuracy = 0.0
-
-        for inputs, targets in test_loader:
+        
+        for batch_idx, (inputs, targets) in enumerate(test_loader):
             inputs, targets = inputs.to(self.__device), targets.to(self.__device)
-            for input, target in zip(inputs, targets):
-                model = self.get_model(fine_tuned)
-                if MEMO:
+            if MEMO:
+                for input, target in zip(inputs, targets):
+                    model = self.get_model(weights_imagenet)
                     MEMO_augmentations = self.get_MEMO_augmentations(input, augmentations, num_augmentations, seed_augmentations)
-                    optimizer = self.get_optimizer(model = model, fine_tuned = fine_tuned, lr_setting = lr_setting)
-                    probab_augmentations = torch.softmax(model(MEMO_augmentations), dim = 1)
+                    optimizer = self.get_optimizer(model = model, lr_setting = lr_setting)
+                    logits = model(MEMO_augmentations)
+                    logits = logits[:, imagenetA_masking]
+                    probab_augmentations = torch.softmax(logits, dim=1)
                     if top_augmentations:
                         probab_augmentations = self.get_best_augmentations(probab_augmentations, top_augmentations)
                     marginal_output_distribution = torch.mean(probab_augmentations, dim=0)
@@ -146,29 +154,33 @@ class MEMO:
                     marginal_loss.backward()
                     optimizer.step()
                     optimizer.zero_grad()
-                
-                normalize_input  = T.Compose([
-                    T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-                ])
-                
-                input = normalize_input(input)
-                probab_pred = torch.softmax(model(input.unsqueeze(0)), dim=1)
-                y_pred = probab_pred.argmax()
-                cumulative_accuracy += int(target == y_pred)
+                    input = normalize_input(input)
+                    probab_pred = torch.softmax(model(input.unsqueeze(0)), dim=1)
+                    y_pred = probab_pred.argmax()
+                    cumulative_accuracy += int(target == y_pred)
+            else:
+                with torch.no_grad():
+                    inputs = normalize_input(inputs)
+                    logits = model(inputs)
+                    logits = logits[:,imagenetA_masking]
+                    predicted = torch.argmax(logits, dim=1)
+                    cumulative_accuracy += (predicted == targets).sum().item()
                     
             samples += inputs.shape[0]
 
+            if verbose and batch_idx % log_interval == 0:
+                current_accuracy = cumulative_accuracy / samples * 100
+                print(f'Batch {batch_idx}/{len(test_loader)}, Accuracy: {current_accuracy:.2f}%', end='\r')
+
         accuracy = cumulative_accuracy / samples * 100
-        print("accuracy:", accuracy)
         self.save_result(accuracy = accuracy, 
-                         seed_data = seed_data, 
                          path_result = path_result, 
                          seed_augmentations = seed_augmentations, 
                          num_augmentations = num_augmentations, 
                          augmentations = augmentations, 
                          top_augmentations = top_augmentations, 
                          MEMO = MEMO, 
-                         fine_tuned = fine_tuned,
-                         lr_setting = lr_setting)
+                         lr_setting = lr_setting,
+                         weights_imagenet = weights_imagenet)
         
         return accuracy

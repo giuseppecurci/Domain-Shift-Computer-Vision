@@ -69,7 +69,7 @@ class S3ImageFolder(Dataset):
 
         return img, self.class_to_idx[label]
 
-def get_data(batch_size, img_root, seed, split_data = True,transform = None):
+def get_data(batch_size, img_root, seed = None, split_data = False,transform = None):
 
     # Load data
     data = S3ImageFolder(root=img_root, transform=transform)

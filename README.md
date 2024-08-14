@@ -2,6 +2,31 @@
 
 In machine learning, domain shift refers to the difference in data distribution between the training and testing phases. As a result, models trained on one domain often perform poorly when applied to another, unseen domain, leading to degraded performance and unreliable predictions. Test Time Adaptation (TTA) is a technique designed to address this challenge by allowing the model to adapt to the new domain during inference, without requiring any additional labeled data. 
 
+## Repository Overview
+
+This repository contains code for experiments conducted, methods utilized, and utilities. Here's a brief overview of the main components:
+
+```
+├── example.ipynb
+├── experiments
+│   └── Resnet50_ImagenetA_SGD
+│   ┆   ├── model:resnet50_weights:IMAGENET1K_V1_seed_aug:42_aug:16_topaug:8_MEMO:False
+│   ┆   ┆
+│   ┆   └── model:resnet50_weights:IMAGENET1K_V1_seed_aug:42_aug:16_topaug:8_MEMO:True_priorBN:16.0
+│   ┆
+├── images
+├── test_methods
+│   └── test.py
+├── test_time_adaptation
+│   ├── MEMO.py
+│   └── adaptive_bn.py
+└── utility
+    ├── data
+    └── gradcam
+        ├── activations_and_gradients.py
+        ┆
+```
+ 
 ## Methods Implemented
 
 <br>

@@ -7,8 +7,8 @@ def adaptive_bn_forward(self, input: torch.Tensor):
                         mean = N/(N+1)*mean_train + 1/(N+1)*mean_test
                         var = N/(N+1)*var_train + 1/(N+1)*var_test
     N corresponds to the weight that is given to the statistics of the pre-trained model.
-    In the implementation, N/(N+1) corresponds to self.prior_strength and can be modified using
-    nn.BatchNorm2d.prior_strength. 
+    In the implementation, N/(N+1) corresponds to self.prior_strength and can be modified assigning
+    a float/int to nn.BatchNorm2d.prior_strength. 
     -----------
     input : input tensor of shape [N, C, H, W]
     """

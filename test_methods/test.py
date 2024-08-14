@@ -139,29 +139,30 @@ class Tester:
              MEMO = False,
              top_augmentations = 0,
              TTA = False,
-             prior_strength = 0.,
+             prior_strength = -1,
              verbose = True,
              log_interval = 1):
         """
         Main function to test a torchvision model with different test-time adaptation techniques 
         and keep track of the results and the experiment setting. 
         ---
-        augmentations: list of torchvision.transforms functions
-        num_augmentations: the number of augmentations to use for each sample to perform test-time adaptation
-        seed_augmentations: seed to reproduce the sampling of augmentations
-        img_root: str path to get a dataset in a torch format
+        augmentations: list of torchvision.transforms functions.
+        num_augmentations: the number of augmentations to use for each sample to perform test-time adaptation.
+        seed_augmentations: seed to reproduce the sampling of augmentations.
+        img_root: str path to get a dataset in a torch format.
         lr_setting: list with lr instructions to adapt the model. See "get_optimizer" for more details.
         weights_imagenet: weights_imagenet should have a value in accordance with the parameter 
-                          weights of torchvision.models
+                          weights of torchvision.models.
         dataset: the name of the dataset to use. Note: this parameter doesn't directly control the data 
                  used, it's only used to use the right masking to map the models' outputs to the right dimensions. 
                  At the moment only Imagenet-A masking is supported.
         MEMO: a boolean to use marginal entropy minimization with one test point
         TTA: a boolean to use test time augmentation
-        top_augmentations: if MEMO or TTA are set to True, then values higher than zero select the augmentations 
-                           with the lowest entropy (highest confidence)
-        prior_strength: defines the weight given to pre-trained statistics in BN adaptation 
-        verbose: use loading bar to visualize accuracy and number of batch during testing
+        top_augmentations: if MEMO or TTA are set to True, then values higher than zero select the top_augmentations 
+                           with the lowest entropy (highest confidence).
+        prior_strength: defines the weight given to pre-trained statistics in BN adaptation. If negative, then no BN
+                        adaptation is applied.
+        verbose: use loading bar to visualize accuracy and number of batch during testing.
         log_interval: defines after how many batches a new accuracy should be displayed. Default is 1, thus 
                       after each batch a new value is displayed. 
         """
@@ -170,6 +171,7 @@ class Tester:
             assert not (num_augmentations or top_augmentations), "If both MEMO and TTA are set to False, then top_augmentations must be 0"
         assert not (weights_imagenet or lr_setting) if not MEMO else True, "If MEMO is false, then lr_setting and weights_imagenet must be None" 
         assert prior_strength >= 0, "prior_strength must a non-negative float"
+        assert isinstance(prior_strength, (float,int)) , "Prior adaptation must be either a float or an int"
         
         # get the name of the weigths used and define the name of the experiment 
         weights_name = str(weights_imagenet).split(".")[-1] if weights_imagenet else "MEMO_repo"
@@ -205,15 +207,15 @@ class Tester:
         if dataset == "imagenetA":
             imagenetA_masking = self.get_imagenetA_masking()
 
-        if prior_strength:
-            assert isinstance(prior_strength, float), "Prior adaptation must be a float"
+        if prior_strength < 0:
+            torch.nn.BatchNorm2d.prior_strength = 1
+        else:
             torch.nn.BatchNorm2d.prior_strength = prior_strength / (prior_strength + 1)
             torch.nn.BatchNorm2d.forward = adaptive_bn_forward
             
         samples = 0.0
         cumulative_accuracy = 0.0
 
-        
         for batch_idx, (inputs, targets) in enumerate(test_loader):
             inputs, targets = inputs.to(self.__device), targets.to(self.__device)
             if MEMO or TTA:

@@ -175,7 +175,7 @@ class Tester:
         
         # get the name of the weigths used and define the name of the experiment 
         weights_name = str(weights_imagenet).split(".")[-1] if weights_imagenet else "MEMO_repo"
-        name_result = f"MEMO:{MEMO}_adaptBN:{prior_strength}_TTA:{TTA}_aug:{num_augmentations}_topaug:{top_augmentations}_seed_aug:{seed_augmentations}_weights:{weights_name}"
+        name_result = f"MEMO_{MEMO}_adaptBN_{prior_strength}_TTA_{TTA}_aug_{num_augmentations}_topaug_{top_augmentations}_seed_aug_{seed_augmentations}_weights_{weights_name}"
         path_result = os.path.join(self.__exp_path,name_result)
         assert not os.path.exists(path_result),f"MEMO test already exists: {path_result}"
 

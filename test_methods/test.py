@@ -9,6 +9,7 @@ from test_time_adaptation.resnet50_dropout import ResNet50Dropout
 
 import os
 import json
+import time
 from scipy import stats
 
 class Tester:
@@ -22,7 +23,7 @@ class Tester:
         self.__device = device
         self.__exp_path = exp_path
 
-    def save_result(self, accuracy, path_result, num_augmentations, augmentations, seed_augmentations, top_augmentations, MEMO, lr_setting, weights, prior_strength):
+    def save_result(self, accuracy, path_result, num_augmentations, augmentations, seed_augmentations, top_augmentations, MEMO, lr_setting, weights, prior_strength, time_test):
         """
         Takes all information of the experiment saves it in a json file stored at exp_path
         """
@@ -35,7 +36,8 @@ class Tester:
             "num_augmentations" : num_augmentations,
             "seed_augmentations": seed_augmentations,
             "augmentations" : [str(augmentation) for augmentation in augmentations],
-            "prior_strength" : prior_strength
+            "prior_strength" : prior_strength,
+            "time_test" : time_test
         }
         try:
             with open(path_result, 'w') as json_file:
@@ -213,14 +215,14 @@ class Tester:
                       after each batch a new value is displayed. 
         """
         # check some basic conditions
-        if not (MEMO or TTA):
+        if not (MEMO or TTA):   
             assert not (num_augmentations or top_augmentations), "If both MEMO and TTA are set to False, then top_augmentations must be 0"
         assert not (weights_imagenet or lr_setting) if not MEMO else True, "If MEMO is false, then lr_setting and weights_imagenet must be None" 
         assert isinstance(prior_strength, (float,int)) , "Prior adaptation must be either a float or an int"
 
         # get the name of the weigths used and define the name of the experiment 
         weights_name = str(weights_imagenet).split(".")[-1] if weights_imagenet else "MEMO_repo"
-        name_result = f"MEMO:{MEMO}_adaptBN:{prior_strength}_TTA:{TTA}_aug:{num_augmentations}_topaug:{top_augmentations}_seed_aug:{seed_augmentations}_weights:{weights_name}"
+        name_result = f"MEMO_{MEMO}_adaptBN_{prior_strength}_TTA_{TTA}_aug_{num_augmentations}_topaug_{top_augmentations}_seed_aug_{seed_augmentations}_weights_{weights_name}"
         path_result = os.path.join(self.__exp_path,name_result)
         assert not os.path.exists(path_result),f"MEMO test already exists: {path_result}"
 
@@ -263,6 +265,15 @@ class Tester:
             torch.nn.BatchNorm2d.prior_strength = prior_strength / (prior_strength + 1)
             torch.nn.BatchNorm2d.forward = adaptive_bn_forward
 
+        # Initialize a dictionary to store accumulated time for each step
+        time_dict = {
+            "MEMO_update": 0.0,
+            "get_augmentations": 0.0,
+            "confidence_selection": 0.0,
+            "get_prediction": 0.0,
+            "total_time": 0.0
+        }
+
         samples = 0.0
         cumulative_accuracy = 0.0
 
@@ -276,7 +287,11 @@ class Tester:
                         optimizer.load_state_dict(MEMO_checkpoint['optimizer'])
 
                     # get normalized augmentations
+                    start_time_augmentations = time.time()
                     test_augmentations = self.get_test_augmentations(input, augmentations, num_augmentations, seed_augmentations)
+                    end_time_augmentations = time.time()
+                    time_dict["get_augmentations"] += (end_time_augmentations - start_time_augmentations)
+
                     test_augmentations = test_augmentations.to(self.__device)
                     logits = model(test_augmentations)
 
@@ -288,15 +303,22 @@ class Tester:
 
                     # confidence selection for augmentations
                     if top_augmentations:
+                        start_time_confidence_selection = time.time()
                         probab_augmentations = self.get_best_augmentations(probab_augmentations, top_augmentations)
-
+                        end_time_confidence_selection = time.time()
+                        time_dict["confidence_selection"] += (end_time_confidence_selection - start_time_confidence_selection)
+                    
                     if MEMO:
+                        start_time_memo_update = time.time()
                         marginal_output_distribution = torch.mean(probab_augmentations, dim=0)
                         marginal_loss = self.compute_entropy(marginal_output_distribution)
                         marginal_loss.backward()
                         optimizer.step()
                         optimizer.zero_grad()
-
+                        end_time_memo_update = time.time()
+                        time_dict["MEMO_update"] += (end_time_memo_update - start_time_memo_update)
+                    
+                    start_time_prediction = time.time()
                     with torch.no_grad():
                         if TTA:
                             # statistics:
@@ -307,11 +329,16 @@ class Tester:
                             input = normalize_input(input)
                             y_pred, statistics = self.get_prediction(input, model, imagenetA_masking, MC=MC)
                         cumulative_accuracy += int(target == y_pred)
+                    end_time_prediction = time.time()
+                    time_dict["get_prediction"] += (end_time_prediction - start_time_prediction)
             else:
+                start_time_prediction = time.time()
                 with torch.no_grad():
                     inputs = normalize_input(inputs)
                     y_pred = self.get_prediction(inputs, model, imagenetA_masking)
                     cumulative_accuracy += (y_pred == targets).sum().item()
+                end_time_prediction = time.time()
+                time_dict["get_prediction"] += (end_time_prediction - start_time_prediction)
 
             samples += inputs.shape[0]
 
@@ -320,6 +347,7 @@ class Tester:
                 print(f'Batch {batch_idx}/{len(test_loader)}, Accuracy: {current_accuracy:.2f}%', end='\r')
 
         accuracy = cumulative_accuracy / samples * 100
+        time_dict["total_time"] += sum(time_dict.values())
 
         self.save_result(accuracy = accuracy,
                          path_result = path_result,
@@ -330,6 +358,7 @@ class Tester:
                          MEMO = MEMO,
                          lr_setting = lr_setting,
                          weights = weights_name,
-                         prior_strength = prior_strength)
+                         prior_strength = prior_strength,
+                         time_test = time_dict)
 
         return accuracy

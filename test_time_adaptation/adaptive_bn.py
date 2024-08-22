@@ -1,4 +1,4 @@
-import torch 
+import torch
 
 def adaptive_bn_forward(self, input: torch.Tensor):
     """
@@ -16,10 +16,10 @@ def adaptive_bn_forward(self, input: torch.Tensor):
     point_mean = input.mean([0,2,3]).to(device = self.running_mean.device) 
     point_var = input.var([0,2,3], unbiased=True).to(device = self.running_mean.device)
     # BN adaptation
-    adapted_running_mean = self.prior * self.running_mean + (1 - self.prior_strength) * point_mean
-    adapted_running_var = self.prior * self.running_var + (1 - self.prior_strength) * point_var
+    adapted_running_mean = self.prior_strength * self.running_mean + (1 - self.prior_strength) * point_mean
+    adapted_running_var = self.prior_strength * self.running_var + (1 - self.prior_strength) * point_var
     # detach to avoid non-differentiable torch error
     adapted_running_mean = adapted_running_mean.detach()
     adapted_running_var = adapted_running_var.detach()
-    
+
     return torch.nn.functional.batch_norm(input, adapted_running_mean, adapted_running_var, self.weight, self.bias, False, 0, self.eps)

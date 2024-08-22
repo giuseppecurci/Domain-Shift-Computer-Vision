@@ -5,13 +5,15 @@ import torch.nn.functional as F
 from utility.data.get_data import get_data
 from test_time_adaptation.adaptive_bn import adaptive_bn_forward
 from test_time_adaptation.MEMO import compute_entropy, get_best_augmentations, get_test_augmentations
+from test_time_adaptation.resnet50_dropout import ResNet50Dropout
 
 import os
 import json
+from scipy import stats
 
 class Tester:
     """
-    A class to run all the experiments. It stores all the informations to reproduce the experiments in a json file 
+    A class to run all the experiments. It stores all the informations to reproduce the experiments in a json file
     at exp_path. 
     """
     def __init__(self, model, optimizer, exp_path, device):
@@ -41,25 +43,30 @@ class Tester:
         except:
             print("Result were not saved")
 
-    def get_model(self, weights_imagenet):
+    def get_model(self, weights_imagenet, MC):
         """
-        Utility function to instantiate a torch model. The argument weights_imagenet should have 
+        Utility function to instantiate a torch model. The argument weights_imagenet should have
         a value in accordance with the parameter weights of torchvision.models.
         """
-        model = self.__model(weights=weights_imagenet)
+        if MC:
+            self.__model=ResNet50Dropout(weights=weights_imagenet, dropout_rate=MC['dropout_rate'])
+            model = self.__model
+        else:
+            model = self.__model(weights=weights_imagenet)
+
         model.to(self.__device)
         model.eval()
-        return model 
+        return model
 
     def get_optimizer(self, model, lr_setting:list):
         """
         Utility function to instantiate a torch optimizer.
         ----------
-        lr_setting: must be a list containing either one global lr for the whole model or a dictionary 
-        where each value is a list with a list of parameters' names and a lr for those parameters. 
+        lr_setting: must be a list containing either one global lr for the whole model or a dictionary
+        where each value is a list with a list of parameters' names and a lr for those parameters.
         e.g. 
         lr_setting = [{
-            "classifier" : [["fc.weight", "fc.bias"], 0.00025]    
+            "classifier" : [["fc.weight", "fc.bias"], 0.00025]
             }, 0]
         lr_setting = [0.00025]
         """
@@ -90,24 +97,62 @@ class Tester:
         indices_in_1k = [int(k) for k in imagenetA_masking if imagenetA_masking[k] != -1]
         return indices_in_1k
 
-    def get_prediction(self, image_tensors, model, masking, TTA = False, top_augmentations = 0):
+    def get_monte_carlo_statistics(self, mc_logits):
+        """
+        Compute mean, median, mode and standard deviation of the Monte Carlo samples.
+        """
+        statistics = {}
+        mean_logits = mc_logits.mean(dim=0)
+        statistics['mean'] = mean_logits
+
+        median_logits = mc_logits.median(dim=0).values
+        statistics['median'] = median_logits
+
+        pred_classes = mc_logits.argmax(dim=1)
+        pred_classes_cpu = pred_classes.cpu().numpy()
+        mode_predictions, _ = stats.mode(pred_classes_cpu, axis=0)
+        mode_predictions = torch.tensor(mode_predictions.squeeze(), dtype=torch.long)
+        statistics['mode'] = mode_predictions
+
+        uncertainty = mc_logits.var(dim=0)
+        statistics['std'] = uncertainty
+        return statistics
+
+    def get_prediction(self, image_tensors, model, masking, TTA = False, top_augmentations = 0, MC = None):
         """
         Takes a tensor of images and outputs a prediction for each image.
         ----------
         image_tensors: is a tensor of [B,C,H,W] if TTA is used or if both MEMO and TTA are not used, or of dimension [C,H,W]
                        if only MEMO is used
         masking: a list of indices to map the imagenet1k logits to the one of imagenet-A
-        top_augmentations: a non-negative integer, if greater than 0 then a the "top_augmentations" with the lowest entropy are
-                           selected to make the final prediction 
+        top_augmentations: a non-negative integer, if greater than 0 then the "top_augmentations" with the lowest entropy are
+                           selected to make the final prediction
+        MC: a dictionary containing the number of evaluations using Monte Carlo Dropout and the dropout rate
         """
-        logits = model(image_tensors)[:,masking] if image_tensors.dim() == 4 else model(image_tensors.unsqueeze(0))[:,masking]
-        if TTA:
-            probab_augmentations = F.softmax(logits - logits.max(dim=1)[0][:, None], dim=1)
-            if top_augmentations:
-                probab_augmentations = self.get_best_augmentations(probab_augmentations, top_augmentations)
-            y_pred = probab_augmentations.mean(dim=0).argmax().item()
-            return y_pred
-        return logits.argmax(dim=1)
+        if MC:
+            model.train()  # enable dropout by setting the model to training mode
+            mc_logits = []
+            for _ in range(MC['num_samples']):
+                logits = model(image_tensors)[:,masking] if image_tensors.dim() == 4 else model(image_tensors.unsqueeze(0))[:,masking]
+                mc_logits.append(logits)
+            mc_logits = torch.stack(mc_logits, dim=0)
+            if TTA:
+                # first mean is over MC samples, second mean is over TTA augmentations
+                probab_augmentations = F.softmax(mc_logits - mc_logits.max(dim=2, keepdim=True)[0], dim=2)
+                y_pred = probab_augmentations.mean(dim=0).mean(dim=0).argmax().item()
+                statistics = self.get_monte_carlo_statistics(probab_augmentations.mean(dim=1))
+                return y_pred, statistics
+            statistics = self.get_monte_carlo_statistics(mc_logits)
+            return statistics['median'].argmax(dim=1), statistics
+        else:
+            logits = model(image_tensors)[:,masking] if image_tensors.dim() == 4 else model(image_tensors.unsqueeze(0))[:,masking]
+            if TTA:
+                probab_augmentations = F.softmax(logits - logits.max(dim=1)[0][:, None], dim=1)
+                if top_augmentations:
+                    probab_augmentations = self.get_best_augmentations(probab_augmentations, top_augmentations)
+                y_pred = probab_augmentations.mean(dim=0).argmax().item()
+                return y_pred, None
+            return logits.argmax(dim=1), None
 
     def compute_entropy(self, probabilities: torch.tensor):
         """
@@ -126,8 +171,8 @@ class Tester:
         See MEMO.py
         """
         return get_test_augmentations(input, augmentations, num_augmentations, seed_augmentations)
-        
-    def test(self, 
+
+    def test(self,
              augmentations:list, 
              num_augmentations:int, 
              seed_augmentations:int,  
@@ -141,7 +186,8 @@ class Tester:
              TTA = False,
              prior_strength = -1,
              verbose = True,
-             log_interval = 1):
+             log_interval = 1,
+             MC = None):
         """
         Main function to test a torchvision model with different test-time adaptation techniques 
         and keep track of the results and the experiment setting. 
@@ -170,14 +216,18 @@ class Tester:
         if not (MEMO or TTA):
             assert not (num_augmentations or top_augmentations), "If both MEMO and TTA are set to False, then top_augmentations must be 0"
         assert not (weights_imagenet or lr_setting) if not MEMO else True, "If MEMO is false, then lr_setting and weights_imagenet must be None" 
-        assert prior_strength >= 0, "prior_strength must a non-negative float"
         assert isinstance(prior_strength, (float,int)) , "Prior adaptation must be either a float or an int"
-        
+
         # get the name of the weigths used and define the name of the experiment 
         weights_name = str(weights_imagenet).split(".")[-1] if weights_imagenet else "MEMO_repo"
-        name_result = f"MEMO_{MEMO}_adaptBN_{prior_strength}_TTA_{TTA}_aug_{num_augmentations}_topaug_{top_augmentations}_seed_aug_{seed_augmentations}_weights_{weights_name}"
+        name_result = f"MEMO:{MEMO}_adaptBN:{prior_strength}_TTA:{TTA}_aug:{num_augmentations}_topaug:{top_augmentations}_seed_aug:{seed_augmentations}_weights:{weights_name}"
         path_result = os.path.join(self.__exp_path,name_result)
         assert not os.path.exists(path_result),f"MEMO test already exists: {path_result}"
+
+        # in case of using dropout, check if the model is a ResNet50Dropout and the parameters are correct
+        if MC:
+            assert isinstance(self.__model, ResNet50Dropout), f"To use dropout the model must be a ResNet50Dropout"
+            assert MC['num_samples'] > 1, f"To use dropout the number of samples must be greater than 1" 
 
         # transformation pipeline used in ResNet-50 original training
         transform_loader = T.Compose([
@@ -187,12 +237,12 @@ class Tester:
         ])
 
         # to use after model's update
-        normalize_input  = T.Compose([
+        normalize_input = T.Compose([
                         T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
                     ])
-        
+
         test_loader = get_data(batch_size, img_root, transform = transform_loader, split_data=False)
-        model = self.get_model(weights_imagenet)
+        model = self.get_model(weights_imagenet, MC)
 
         # if MEMO is used, create a checkpoint to reload after each model and optimizer update
         if MEMO:
@@ -203,7 +253,7 @@ class Tester:
                 'optimizer': optimizer.state_dict(),
             }, MEMO_checkpoint_path)
             MEMO_checkpoint = torch.load(MEMO_checkpoint_path)
-        
+
         if dataset == "imagenetA":
             imagenetA_masking = self.get_imagenetA_masking()
 
@@ -212,7 +262,7 @@ class Tester:
         else:
             torch.nn.BatchNorm2d.prior_strength = prior_strength / (prior_strength + 1)
             torch.nn.BatchNorm2d.forward = adaptive_bn_forward
-            
+
         samples = 0.0
         cumulative_accuracy = 0.0
 
@@ -232,14 +282,14 @@ class Tester:
 
                     # apply imagenetA masking
                     if dataset == "imagenetA":
-                        logits = logits[:, imagenetA_masking] 
+                        logits = logits[:, imagenetA_masking]
                     # compute stable softmax
-                    probab_augmentations = F.softmax(logits - logits.max(dim=1)[0][:, None], dim=1) 
+                    probab_augmentations = F.softmax(logits - logits.max(dim=1)[0][:, None], dim=1)
 
                     # confidence selection for augmentations
                     if top_augmentations:
                         probab_augmentations = self.get_best_augmentations(probab_augmentations, top_augmentations)
-                    
+
                     if MEMO:
                         marginal_output_distribution = torch.mean(probab_augmentations, dim=0)
                         marginal_loss = self.compute_entropy(marginal_output_distribution)
@@ -249,17 +299,20 @@ class Tester:
 
                     with torch.no_grad():
                         if TTA:
-                            y_pred = self.get_prediction(test_augmentations, model, imagenetA_masking, TTA, top_augmentations)
+                            # statistics:
+                            # dictionary containing statistics resulting from the application of monte carlo dropout
+                            # look at get_monte_carlo_statistics() for more details
+                            y_pred, statistics = self.get_prediction(test_augmentations, model, imagenetA_masking, TTA, top_augmentations, MC=MC)
                         else:
                             input = normalize_input(input)
-                            y_pred = self.get_prediction(input, model, imagenetA_masking)
+                            y_pred, statistics = self.get_prediction(input, model, imagenetA_masking, MC=MC)
                         cumulative_accuracy += int(target == y_pred)
             else:
                 with torch.no_grad():
                     inputs = normalize_input(inputs)
                     y_pred = self.get_prediction(inputs, model, imagenetA_masking)
                     cumulative_accuracy += (y_pred == targets).sum().item()
-                    
+
             samples += inputs.shape[0]
 
             if verbose and batch_idx % log_interval == 0:
@@ -267,16 +320,16 @@ class Tester:
                 print(f'Batch {batch_idx}/{len(test_loader)}, Accuracy: {current_accuracy:.2f}%', end='\r')
 
         accuracy = cumulative_accuracy / samples * 100
-        
-        self.save_result(accuracy = accuracy, 
-                         path_result = path_result, 
-                         seed_augmentations = seed_augmentations, 
-                         num_augmentations = num_augmentations, 
-                         augmentations = augmentations, 
-                         top_augmentations = top_augmentations, 
-                         MEMO = MEMO, 
+
+        self.save_result(accuracy = accuracy,
+                         path_result = path_result,
+                         seed_augmentations = seed_augmentations,
+                         num_augmentations = num_augmentations,
+                         augmentations = augmentations,
+                         top_augmentations = top_augmentations,
+                         MEMO = MEMO,
                          lr_setting = lr_setting,
                          weights = weights_name,
                          prior_strength = prior_strength)
-        
+
         return accuracy

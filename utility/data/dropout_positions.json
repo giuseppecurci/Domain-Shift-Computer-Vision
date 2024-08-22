@@ -1,0 +1,11 @@
+{
+    "dropout_positions": [
+        "conv1",
+        "layer1",
+        "layer2",
+        "layer3",
+        "layer4",
+        "avgpool",
+        "fc"
+    ]
+}

@@ -24,7 +24,7 @@ class Tester:
         self.__device = device
         self.__exp_path = exp_path
 
-    def save_result(self, accuracy, path_result, num_augmentations, augmentations, seed_augmentations, top_augmentations, MEMO, lr_setting, weights, prior_strength, time_test):
+    def save_result(self, accuracy, path_result, num_augmentations, augmentations, seed_augmentations, top_augmentations, MEMO, num_adaptation_steps, lr_setting, weights, prior_strength, time_test, use_MC):
         """
         Takes all information of the experiment saves it in a json file stored at exp_path
         """
@@ -32,12 +32,14 @@ class Tester:
             "accuracy": accuracy,
             "top_augmentations" : top_augmentations,
             "use_MEMO" : MEMO,
+            "num_adaptation_steps" : num_adaptation_steps,
             "lr_setting" : lr_setting,
             "weights" : weights,
             "num_augmentations" : num_augmentations,
             "seed_augmentations": seed_augmentations,
             "augmentations" : [str(augmentation) for augmentation in augmentations],
             "prior_strength" : prior_strength,
+            "MC" : use_MC,
             "time_test" : time_test
         }
         try:
@@ -215,6 +217,9 @@ class Tester:
             if TTA:
                 # first mean is over MC samples, second mean is over TTA augmentations
                 probab_augmentations = F.softmax(mc_logits - mc_logits.max(dim=2, keepdim=True)[0], dim=2)
+                # TO CHECK IF get_best_aug IS COMPATIBLE WITH MC
+                # if top_augmentations:
+                #    probab_augmentations = self.get_best_augmentations(probab_augmentations, top_augmentations)
                 y_pred = probab_augmentations.mean(dim=0).mean(dim=0).argmax().item()
                 statistics = self.get_monte_carlo_statistics(probab_augmentations.mean(dim=1))
                 return y_pred, statistics
@@ -247,7 +252,13 @@ class Tester:
         See MEMO.py
         """
         return get_test_augmentations(input, augmentations, num_augmentations, seed_augmentations)
-
+     
+    def retrieve_synthetic_images(self):
+        """
+        Function to retrieve the synthetically generated images before test time using CLIP embeddings.
+        """
+        pass 
+        
     def test(self,
              augmentations:list, 
              num_augmentations:int, 
@@ -258,13 +269,13 @@ class Tester:
              dataset = "imagenetA",
              batch_size = 64,
              MEMO = False,
+             num_adaptation_steps = 0,
              top_augmentations = 0,
              TTA = False,
              prior_strength = -1,
              verbose = True,
              log_interval = 1,
-             MC = None,
-             LM = None):
+             MC = None):
         """
         Main function to test a torchvision model with different test-time adaptation techniques 
         and keep track of the results and the experiment setting. 
@@ -290,6 +301,7 @@ class Tester:
                       after each batch a new value is displayed. 
         """
         # check some basic conditions
+        assert bool(num_adaptation_steps) == MEMO, "When using MEMO adaptation steps should be >1, otherwise equal to 0."  
         if not (MEMO or TTA):
             assert not (num_augmentations or top_augmentations), "If both MEMO and TTA are set to False, then top_augmentations must be 0"
         assert not (weights_imagenet or lr_setting) if not MEMO else True, "If MEMO is false, then lr_setting and weights_imagenet must be None" 
@@ -297,7 +309,8 @@ class Tester:
 
         # get the name of the weigths used and define the name of the experiment 
         weights_name = str(weights_imagenet).split(".")[-1] if weights_imagenet else "MEMO_repo"
-        name_result = f"MEMO_{MEMO}_adaptBN_{prior_strength}_TTA_{TTA}_aug_{num_augmentations}_topaug_{top_augmentations}_seed_aug_{seed_augmentations}_weights_{weights_name}"
+        use_MC = True if MC else False
+        name_result = f"MEMO_{MEMO}AdaptSteps_{num_adaptation_steps}_adaptBN_{prior_strength}_TTA_{TTA}_aug_{num_augmentations}_topaug_{top_augmentations}_seed_aug_{seed_augmentations}_weights_{weights_name}_MC_{use_MC}"
         path_result = os.path.join(self.__exp_path,name_result)
         assert not os.path.exists(path_result),f"MEMO test already exists: {path_result}"
 
@@ -305,16 +318,6 @@ class Tester:
         if MC:
             assert isinstance(self.__model, ResNet50Dropout), f"To use dropout the model must be a ResNet50Dropout"
             assert MC['num_samples'] > 1, f"To use dropout the number of samples must be greater than 1" 
-
-        # in case of using llama, check if the model name is present and the parameters are correct
-        # and then proceed to create the new images
-        if LM:
-            assert isinstance(LM['model'], str), "Llama model name should be a string"
-            assert LM['model'] != "", "Llama model name should not be empty"
-            assert LM['model'] != None, "Llama model name should not be None"
-            assert LM['num_samples'] >= 1, f"Number of promts you want to generate with llama must be greater or equal to 1"
-
-            # create the new images
 
         # transformation pipeline used in ResNet-50 original training
         transform_loader = T.Compose([
@@ -378,30 +381,31 @@ class Tester:
                     time_dict["get_augmentations"] += (end_time_augmentations - start_time_augmentations)
 
                     test_augmentations = test_augmentations.to(self.__device)
-                    logits = model(test_augmentations)
-
-                    # apply imagenetA masking
-                    if dataset == "imagenetA":
-                        logits = logits[:, imagenetA_masking]
-                    # compute stable softmax
-                    probab_augmentations = F.softmax(logits - logits.max(dim=1)[0][:, None], dim=1)
-
-                    # confidence selection for augmentations
-                    if top_augmentations:
-                        start_time_confidence_selection = time.time()
-                        probab_augmentations = self.get_best_augmentations(probab_augmentations, top_augmentations)
-                        end_time_confidence_selection = time.time()
-                        time_dict["confidence_selection"] += (end_time_confidence_selection - start_time_confidence_selection)
-
-                    if MEMO:
-                        start_time_memo_update = time.time()
-                        marginal_output_distribution = torch.mean(probab_augmentations, dim=0)
-                        marginal_loss = self.compute_entropy(marginal_output_distribution)
-                        marginal_loss.backward()
-                        optimizer.step()
-                        optimizer.zero_grad()
-                        end_time_memo_update = time.time()
-                        time_dict["MEMO_update"] += (end_time_memo_update - start_time_memo_update)
+                    for _ in (num_adaptation_steps):
+                        logits = model(test_augmentations)
+    
+                        # apply imagenetA masking
+                        if dataset == "imagenetA":
+                            logits = logits[:, imagenetA_masking]
+                        # compute stable softmax
+                        probab_augmentations = F.softmax(logits - logits.max(dim=1)[0][:, None], dim=1)
+    
+                        # confidence selection for augmentations
+                        if top_augmentations:
+                            start_time_confidence_selection = time.time()
+                            probab_augmentations = self.get_best_augmentations(probab_augmentations, top_augmentations)
+                            end_time_confidence_selection = time.time()
+                            time_dict["confidence_selection"] += (end_time_confidence_selection - start_time_confidence_selection)
+    
+                        if MEMO:
+                            start_time_memo_update = time.time()
+                            marginal_output_distribution = torch.mean(probab_augmentations, dim=0)
+                            marginal_loss = self.compute_entropy(marginal_output_distribution)
+                            marginal_loss.backward()
+                            optimizer.step()
+                            optimizer.zero_grad()
+                            end_time_memo_update = time.time()
+                            time_dict["MEMO_update"] += (end_time_memo_update - start_time_memo_update)
 
                     start_time_prediction = time.time()
                     with torch.no_grad():
@@ -441,9 +445,11 @@ class Tester:
                          augmentations = augmentations,
                          top_augmentations = top_augmentations,
                          MEMO = MEMO,
+                         num_adaptation_steps = num_adaptation_steps,
                          lr_setting = lr_setting,
                          weights = weights_name,
                          prior_strength = prior_strength,
+                         use_MC = use_MC,
                          time_test = time_dict)
 
         return accuracy

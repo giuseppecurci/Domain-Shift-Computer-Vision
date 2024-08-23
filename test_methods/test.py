@@ -6,6 +6,7 @@ from utility.data.get_data import get_data
 from test_time_adaptation.adaptive_bn import adaptive_bn_forward
 from test_time_adaptation.MEMO import compute_entropy, get_best_augmentations, get_test_augmentations
 from test_time_adaptation.resnet50_dropout import ResNet50Dropout
+from test_time_adaptation.llama import Llama
 
 import os
 import json
@@ -99,6 +100,79 @@ class Tester:
         indices_in_1k = [int(k) for k in imagenetA_masking if imagenetA_masking[k] != -1]
         return indices_in_1k
 
+    def get_imagenetA_classes(self):
+        """
+        ImageNet-A uses the same label structure as the original ImageNet (ImageNet-1K).
+        Each class in ImageNet is represented by a synset ID (e.g., n01440764 for "tench, Tinca tinca").
+        This function returns a dictionary that maps the synset IDs of ImageNet-A to the corresponding class names.
+        ----------
+        indices_in_1k: list of indices to map [B,1000] -> [B,200]
+        """
+        imagenetA_classes_path = "/home/sagemaker-user/Domain-Shift-Computer-Vision/utility/data/imagenetA_classes.json"
+        imagenetA_classes_dict = None
+        with open(imagenetA_classes_path, 'r') as json_file:
+            imagenetA_classes_dict = json.load(json_file)
+
+        # ensure `class_dict` is a dictionary with keys as class IDs and values as class names
+        class_dict = {k: v for k, v in imagenetA_classes_dict.items()}
+        return class_dict
+
+    def save_image_and_embedding(image_tensor, embedding_tensor, file_path):
+        """
+        Save an image tensor and its corresponding embedding tensor in the same file.
+
+        Args:
+            image_tensor (torch.Tensor): The tensor representing the image.
+            embedding_tensor (torch.Tensor): The tensor representing the embedding.
+            file_path (str): The path where the file will be saved.
+        """
+        # Create a dictionary to store both tensors
+        data = {
+            'image': image_tensor,
+            'embedding': embedding_tensor
+        }
+        
+        # Save the dictionary to the specified file path
+        torch.save(data, file_path)
+
+    # to be completed
+    def generate_images(self, LM):
+        """
+        _summary_
+
+        Args:
+            LM (_type_): _description_
+        """
+        data_path = "/home/sagemaker-user/Domain-Shift-Computer-Vision/utility/data/st_images"
+        os.makedirs(data_path, exist_ok=True)
+
+        classes = self.get_imagenetA_classes()
+
+        # Load the Llama model
+        llama = Llama(model_name=LM['model'], num_samples=LM['num_samples'])
+
+        # Generate prompt sequences for each class in ImageNet
+        prompts = {}
+        for class_id, class_name in classes.items():
+            # Generate prompt sequences for the current class
+            prompts[class_id] = llama.generate_sentence(class_name)
+
+        # Generate images for each prompt sequence
+        for class_id, sequences in prompts.items():
+            # Create a directory for the current class
+            class_dir = os.path.join(data_path, class_id)
+            os.makedirs(class_dir, exist_ok=True)
+
+            # Generate images for each prompt sequence
+            for i, sequence in enumerate(sequences):
+                # Generate an image for the current prompt sequence
+                image = None  # Replace this with the code to generate an image from the prompt sequence
+                embed = None # Replace this with the code to generate an embedding from the prompt sequence
+
+                # Save the image and embedding to a file
+                file_path = os.path.join(class_dir, f'image_{i}.pt')
+                self._save_image_and_embedding(image, embed, file_path)
+        
     def get_monte_carlo_statistics(self, mc_logits):
         """
         Compute mean, median, mode and standard deviation of the Monte Carlo samples.
@@ -189,7 +263,8 @@ class Tester:
              prior_strength = -1,
              verbose = True,
              log_interval = 1,
-             MC = None):
+             MC = None,
+             LM = None):
         """
         Main function to test a torchvision model with different test-time adaptation techniques 
         and keep track of the results and the experiment setting. 
@@ -215,7 +290,7 @@ class Tester:
                       after each batch a new value is displayed. 
         """
         # check some basic conditions
-        if not (MEMO or TTA):   
+        if not (MEMO or TTA):
             assert not (num_augmentations or top_augmentations), "If both MEMO and TTA are set to False, then top_augmentations must be 0"
         assert not (weights_imagenet or lr_setting) if not MEMO else True, "If MEMO is false, then lr_setting and weights_imagenet must be None" 
         assert isinstance(prior_strength, (float,int)) , "Prior adaptation must be either a float or an int"
@@ -230,6 +305,16 @@ class Tester:
         if MC:
             assert isinstance(self.__model, ResNet50Dropout), f"To use dropout the model must be a ResNet50Dropout"
             assert MC['num_samples'] > 1, f"To use dropout the number of samples must be greater than 1" 
+
+        # in case of using llama, check if the model name is present and the parameters are correct
+        # and then proceed to create the new images
+        if LM:
+            assert isinstance(LM['model'], str), "Llama model name should be a string"
+            assert LM['model'] != "", "Llama model name should not be empty"
+            assert LM['model'] != None, "Llama model name should not be None"
+            assert LM['num_samples'] >= 1, f"Number of promts you want to generate with llama must be greater or equal to 1"
+
+            # create the new images
 
         # transformation pipeline used in ResNet-50 original training
         transform_loader = T.Compose([
@@ -307,7 +392,7 @@ class Tester:
                         probab_augmentations = self.get_best_augmentations(probab_augmentations, top_augmentations)
                         end_time_confidence_selection = time.time()
                         time_dict["confidence_selection"] += (end_time_confidence_selection - start_time_confidence_selection)
-                    
+
                     if MEMO:
                         start_time_memo_update = time.time()
                         marginal_output_distribution = torch.mean(probab_augmentations, dim=0)
@@ -317,7 +402,7 @@ class Tester:
                         optimizer.zero_grad()
                         end_time_memo_update = time.time()
                         time_dict["MEMO_update"] += (end_time_memo_update - start_time_memo_update)
-                    
+
                     start_time_prediction = time.time()
                     with torch.no_grad():
                         if TTA:

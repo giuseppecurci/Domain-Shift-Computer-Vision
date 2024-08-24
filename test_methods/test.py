@@ -6,7 +6,6 @@ from utility.data.get_data import get_data
 from test_time_adaptation.adaptive_bn import adaptive_bn_forward
 from test_time_adaptation.MEMO import compute_entropy, get_best_augmentations, get_test_augmentations
 from test_time_adaptation.resnet50_dropout import ResNet50Dropout
-from test_time_adaptation.llama import Llama
 
 import os
 import json
@@ -102,79 +101,6 @@ class Tester:
         indices_in_1k = [int(k) for k in imagenetA_masking if imagenetA_masking[k] != -1]
         return indices_in_1k
 
-    def get_imagenetA_classes(self):
-        """
-        ImageNet-A uses the same label structure as the original ImageNet (ImageNet-1K).
-        Each class in ImageNet is represented by a synset ID (e.g., n01440764 for "tench, Tinca tinca").
-        This function returns a dictionary that maps the synset IDs of ImageNet-A to the corresponding class names.
-        ----------
-        indices_in_1k: list of indices to map [B,1000] -> [B,200]
-        """
-        imagenetA_classes_path = "/home/sagemaker-user/Domain-Shift-Computer-Vision/utility/data/imagenetA_classes.json"
-        imagenetA_classes_dict = None
-        with open(imagenetA_classes_path, 'r') as json_file:
-            imagenetA_classes_dict = json.load(json_file)
-
-        # ensure `class_dict` is a dictionary with keys as class IDs and values as class names
-        class_dict = {k: v for k, v in imagenetA_classes_dict.items()}
-        return class_dict
-
-    def save_image_and_embedding(image_tensor, embedding_tensor, file_path):
-        """
-        Save an image tensor and its corresponding embedding tensor in the same file.
-
-        Args:
-            image_tensor (torch.Tensor): The tensor representing the image.
-            embedding_tensor (torch.Tensor): The tensor representing the embedding.
-            file_path (str): The path where the file will be saved.
-        """
-        # Create a dictionary to store both tensors
-        data = {
-            'image': image_tensor,
-            'embedding': embedding_tensor
-        }
-        
-        # Save the dictionary to the specified file path
-        torch.save(data, file_path)
-
-    # to be completed
-    def generate_images(self, LM):
-        """
-        _summary_
-
-        Args:
-            LM (_type_): _description_
-        """
-        data_path = "/home/sagemaker-user/Domain-Shift-Computer-Vision/utility/data/st_images"
-        os.makedirs(data_path, exist_ok=True)
-
-        classes = self.get_imagenetA_classes()
-
-        # Load the Llama model
-        llama = Llama(model_name=LM['model'], num_samples=LM['num_samples'])
-
-        # Generate prompt sequences for each class in ImageNet
-        prompts = {}
-        for class_id, class_name in classes.items():
-            # Generate prompt sequences for the current class
-            prompts[class_id] = llama.generate_sentence(class_name)
-
-        # Generate images for each prompt sequence
-        for class_id, sequences in prompts.items():
-            # Create a directory for the current class
-            class_dir = os.path.join(data_path, class_id)
-            os.makedirs(class_dir, exist_ok=True)
-
-            # Generate images for each prompt sequence
-            for i, sequence in enumerate(sequences):
-                # Generate an image for the current prompt sequence
-                image = None  # Replace this with the code to generate an image from the prompt sequence
-                embed = None # Replace this with the code to generate an embedding from the prompt sequence
-
-                # Save the image and embedding to a file
-                file_path = os.path.join(class_dir, f'image_{i}.pt')
-                self._save_image_and_embedding(image, embed, file_path)
-        
     def get_monte_carlo_statistics(self, mc_logits):
         """
         Compute mean, median, mode and standard deviation of the Monte Carlo samples.
@@ -217,9 +143,8 @@ class Tester:
             if TTA:
                 # first mean is over MC samples, second mean is over TTA augmentations
                 probab_augmentations = F.softmax(mc_logits - mc_logits.max(dim=2, keepdim=True)[0], dim=2)
-                # TO CHECK IF get_best_aug IS COMPATIBLE WITH MC
-                # if top_augmentations:
-                #    probab_augmentations = self.get_best_augmentations(probab_augmentations, top_augmentations)
+                if top_augmentations:
+                    probab_augmentations = self.get_best_augmentations(probab_augmentations, top_augmentations)
                 y_pred = probab_augmentations.mean(dim=0).mean(dim=0).argmax().item()
                 statistics = self.get_monte_carlo_statistics(probab_augmentations.mean(dim=1))
                 return y_pred, statistics
@@ -252,13 +177,13 @@ class Tester:
         See MEMO.py
         """
         return get_test_augmentations(input, augmentations, num_augmentations, seed_augmentations)
-     
+
     def retrieve_synthetic_images(self):
         """
         Function to retrieve the synthetically generated images before test time using CLIP embeddings.
         """
-        pass 
-        
+        pass
+
     def test(self,
              augmentations:list, 
              num_augmentations:int, 
@@ -389,14 +314,14 @@ class Tester:
                             logits = logits[:, imagenetA_masking]
                         # compute stable softmax
                         probab_augmentations = F.softmax(logits - logits.max(dim=1)[0][:, None], dim=1)
-    
+
                         # confidence selection for augmentations
                         if top_augmentations:
                             start_time_confidence_selection = time.time()
                             probab_augmentations = self.get_best_augmentations(probab_augmentations, top_augmentations)
                             end_time_confidence_selection = time.time()
                             time_dict["confidence_selection"] += (end_time_confidence_selection - start_time_confidence_selection)
-    
+
                         if MEMO:
                             start_time_memo_update = time.time()
                             marginal_output_distribution = torch.mean(probab_augmentations, dim=0)

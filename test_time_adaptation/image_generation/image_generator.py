@@ -1,35 +1,28 @@
 import torch
 import json
 import os
+import ollama # if ollama is not available, install by executing the intall_and_run_ollama.sh script
 
-from ollama import generate # if ollama is not available, install by executing the intall_and_run_ollama.sh script
-
-class Tester:
+class ImageGenerator:
     """
     _summary_
     """
-    def __init__(self, LLM):
+    def __init__(self, model):
         """
         _summary_
         """
-        self._LLM = LLM
+        assert isinstance(model,str), "Model must be a str"
+        try:
+          ollama.chat(model)
+        except ollama.ResponseError as e:
+          print('Error:', e.error)
+          if e.status_code == 404:
+            print("Pulling the model...")
+            ollama.pull(model)
+        self.__model = model
 
-    def get_imagenetA_classes(self):
-        """
-        ImageNet-A uses the same label structure as the original ImageNet (ImageNet-1K).
-        Each class in ImageNet is represented by a synset ID (e.g., n01440764 for "tench, Tinca tinca").
-        This function returns a dictionary that maps the synset IDs of ImageNet-A to the corresponding class names.
-        ----------
-        indices_in_1k: list of indices to map [B,1000] -> [B,200]
-        """
-        imagenetA_classes_path = "/home/sagemaker-user/Domain-Shift-Computer-Vision/utility/data/imagenetA_classes.json"
-        imagenetA_classes_dict = None
-        with open(imagenetA_classes_path, 'r') as json_file:
-            imagenetA_classes_dict = json.load(json_file)
-
-        # ensure `class_dict` is a dictionary with keys as class IDs and values as class names
-        class_dict = {k: v for k, v in imagenetA_classes_dict.items()}
-        return class_dict
+    def get_model(self):
+        print(self.__model)
 
     def save_image_and_embedding(self, image_tensor, embedding_tensor, file_path):
         """
@@ -49,19 +42,37 @@ class Tester:
         # Save the dictionary to the specified file path
         torch.save(data, file_path)
 
-    # to be completed
-    def generate_images(self):
+    def generate_prompts(self, num_prompts, style_of_picture, path = None, context_llm = None):
+
+        if context_llm is None:
+            context_llm_path = "/home/sagemaker-user/Domain-Shift-Computer-Vision/test_time_adaptation/image_generation/llm_context.json"
+            with open(file_path, 'r') as file:
+                context_llm = json.load(file) 
+
+        for class_id, class_name in classes.items():
+            prompts_generation_instruction = {
+                "role" : "user",
+                "content" : f"class:{class_name}, number of prompts:{num_prompts}, style of picture: {style_of_picture}"
+            }
+            context_llm.append(prompts_generation_instruction)
+            response = ollama.chat(model='llama3.1', messages=messages)
+            content = response['message']['content']
+            if path:
+                pass
+            else:
+                pass
+        
+    def generate_images(self, num_images):
         """
         _summary_
 
         Args:
             LM (_type_): _description_
         """
+        assert isinstance(num_images,int) and num_images >= 1, "num_samples must be >1 and int" 
         data_path = "/home/sagemaker-user/Domain-Shift-Computer-Vision/utility/data/st_images"
         os.makedirs(data_path, exist_ok=True)
-
-        classes = self.get_imagenetA_classes()
-
+        
         # Generate prompt sequences for each class in ImageNet
         prompts = {}
         for class_id, class_name in classes.items():

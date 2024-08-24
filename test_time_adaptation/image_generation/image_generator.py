@@ -2,6 +2,7 @@ import torch
 import json
 import os
 import ollama # if ollama is not available, install by executing the intall_and_run_ollama.sh script
+from tqdm import tqdm
 
 class ImageGenerator:
     """
@@ -42,26 +43,53 @@ class ImageGenerator:
         # Save the dictionary to the specified file path
         torch.save(data, file_path)
 
-    def generate_prompts(self, num_prompts, style_of_picture, path = None, context_llm = None):
+    def generate_prompts(self, num_prompts, style_of_picture, path, context_llm = None):
 
         if context_llm is None:
             context_llm_path = "/home/sagemaker-user/Domain-Shift-Computer-Vision/test_time_adaptation/image_generation/llm_context.json"
-            with open(file_path, 'r') as file:
+            with open(context_llm_path, 'r') as file:
                 context_llm = json.load(file) 
 
-        for class_id, class_name in classes.items():
-            prompts_generation_instruction = {
-                "role" : "user",
-                "content" : f"class:{class_name}, number of prompts:{num_prompts}, style of picture: {style_of_picture}"
-            }
-            context_llm.append(prompts_generation_instruction)
-            response = ollama.chat(model='llama3.1', messages=messages)
-            content = response['message']['content']
-            if path:
-                pass
-            else:
-                pass
+        skipped_classes = []
         
+        for class_name in tqdm(os.listdir(path), desc="Processing classes"):
+            prompts_generation_instruction = {
+                "role": "user",
+                "content": f"class:{class_name}, number of prompts:{num_prompts}, style of picture: {style_of_picture}"
+            }
+        
+            if len(context_llm) == 3:
+                context_llm.append(prompts_generation_instruction)
+            else:
+                context_llm[3] = prompts_generation_instruction
+            
+            counter_flag = 3
+            while counter_flag>0:
+                try:
+                    response = ollama.chat(model=self.__model, messages=context_llm)
+                    content = json.loads(response['message']['content'])  # json.loads to convert str to list
+                    assert len(content) == num_prompts, (
+                        "The model failed to generate the number of prompts requested. "
+                        "Try to run the command again or consider changing context_llm"
+                    )
+                    counter_flag = -1
+                except Exception as e:
+                    counter_flag -= 1
+
+            if counter_flag == -1:
+                sub_dir_class = os.listdir(os.path.join(path, class_name))
+                for i in range(len(sub_dir_class), num_prompts + len(sub_dir_class)):
+                    new_sub_dir = os.path.join(path, class_name, str(i))
+                    os.makedirs(new_sub_dir, exist_ok=True)
+                    prompt = content[i - len(sub_dir_class)]
+                    with open(os.path.join(new_sub_dir, "prompt.txt"), 'w') as file:
+                        file.write(prompt)
+            else:
+                skipped_classes.append(class_name)
+                print(f"Skipping class {class_name}.")
+                
+        return skipped_classes
+            
     def generate_images(self, num_images):
         """
         _summary_

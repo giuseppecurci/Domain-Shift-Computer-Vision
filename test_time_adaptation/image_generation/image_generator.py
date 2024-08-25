@@ -3,6 +3,7 @@ import os
 from tqdm import tqdm
 import random
 
+import gc
 import torch
 import math
 import ollama # if ollama is not available, install by executing the intall_and_run_ollama.sh script
@@ -13,20 +14,12 @@ class ImageGenerator:
     """
     _summary_
     """
-    def __init__(self, model):
+    def __init__(self):
         """
         _summary_
         """
-        assert isinstance(model,str), "Model must be a str"
-        try:
-          ollama.chat(model)
-        except ollama.ResponseError as e:
-          print('Error:', e.error)
-          if e.status_code == 404:
-            print("Pulling the model...")
-            ollama.pull(model)
-        self.__model = model
-
+        pass 
+        
     def get_model(self):
         print(self.__model)
 
@@ -36,8 +29,17 @@ class ImageGenerator:
         text_embedding /= text_embedding.norm()
         return text_embedding 
         
-    def generate_prompts(self, num_prompts, style_of_picture, path, context_llm, clip_text_encoder = "ViT-L/14"):
-        
+    def generate_prompts(self, num_prompts, style_of_picture, path, context_llm, llm_model = "llama3.1", clip_text_encoder = "ViT-L/14"):
+
+        assert isinstance(model,str), "Model must be a str"
+        try:
+          ollama.chat(llm_model)
+        except ollama.ResponseError as e:
+          print('Error:', e.error)
+          if e.status_code == 404:
+            print("Pulling the model...")
+            ollama.pull(llm_model)
+              
         if isinstance(context_llm,str):
             with open(context_llm, 'r') as file:
                 context_llm = json.load(file) 
@@ -86,7 +88,7 @@ class ImageGenerator:
                 print(f"Skipping class {class_name}.")
 
         return skipped_classes
-
+    
     def get_image_embedding(self,clip_model, preprocess, image):
         image_preprocessed = preprocess(image).unsqueeze(0).cuda()
         image_embedding = clip_model.encode_image(image_preprocessed)
@@ -102,8 +104,11 @@ class ImageGenerator:
         print("Loading CLIP model...")
         clip_model, preprocess = clip.load(clip_image_encoder)
         clip_model.cuda().eval()
-        
+
+        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
         for class_name in tqdm(os.listdir(path), desc="Processing classes"):
+            mem_allocated_before = torch.cuda.memory_allocated() 
+            mem_reserved_before = torch.cuda.memory_reserved() 
             class_path = os.path.join(path, class_name)
             num_prompts = len(os.listdir(class_path))
             if image_generation_pipeline.__class__.__name__ == "StableDiffusionImg2ImgPipeline":
@@ -117,14 +122,15 @@ class ImageGenerator:
             num_prompts = len(os.listdir(class_path))
             n_perm = math.ceil(num_images / num_prompts)
             num_gen_images = 0 # needed if num_images < num_prompts
-            for gen_images_class in tqdm(os.listdir(class_path), desc="Generating images"):
+            for gen_images_class in os.listdir(class_path):
+                if num_gen_images == num_images: break
                 gen_image_class = os.path.join(class_path,gen_images_class)
                 with open(os.path.join(gen_image_class, "prompt.txt"), 'r') as file:
                     text_prompt = file.read()
                 if image_generation_pipeline.__class__.__name__ == "StableDiffusionImg2ImgPipeline":
                     i2i_image_path = os.path.join(gen_image_class,"i2i_gen_images")
                     os.makedirs(i2i_image_path,exist_ok=True)
-                    for _ in tqdm(range(n_perm), desc="Generating Img2Img images"):
+                    for _ in range(n_perm):
                         scraped_image = random.sample(scraped_images,1)[0]
                         with torch.no_grad():
                             gen_image = image_generation_pipeline(prompt=text_prompt,
@@ -132,31 +138,27 @@ class ImageGenerator:
                                                                   strength=strength,
                                                                   guidance_scale=guidance_scale,
                                                                   num_inference_steps=num_inference_steps).images[0]
-                        gen_image_embedding = self.get_image_embedding(clip_model, preprocess, gen_image)
-                        save_gen_image_path = os.path.join(i2i_image_path,str(len(os.listdir(i2i_image_path))))
-                        os.makedirs(save_gen_image_path)
-                        torch.save(gen_image_embedding, os.path.join(save_gen_image_path, "image_embedding.pt"))
-                        gen_image.save(os.path.join(save_gen_image_path, "image.png"))
-                        del gen_image, gen_image_embedding
-                        torch.cuda.empty_cache()
-                        num_gen_images += 1
-                        if num_gen_images > num_images: break
+                            del scraped_image
+                            gen_image_embedding = self.get_image_embedding(clip_model, preprocess, gen_image)
+                            save_gen_image_path = os.path.join(i2i_image_path,str(len(os.listdir(i2i_image_path))))
+                            os.makedirs(save_gen_image_path)
+                            torch.save(gen_image_embedding, os.path.join(save_gen_image_path, "image_embedding.pt"))
+                            gen_image.save(os.path.join(save_gen_image_path, "image.png"))
+                            num_gen_images += 1
+                            if num_gen_images == num_images: break
                 else:
                     t2i_image_path = os.path.join(gen_image_class,"t2i_gen_images")
                     os.makedirs(t2i_image_path,exist_ok=True)
-                    for _ in tqdm(range(n_perm), desc="Generating Text2Img images"):
+                    for _ in range(n_perm):
                         with torch.no_grad():
                             gen_image = image_generation_pipeline(prompt=text_prompt,
                                                                   strength=strength,
                                                                   guidance_scale=guidance_scale,
                                                                   num_inference_steps=num_inference_steps).images[0]
-                        gen_image_embedding = self.get_image_embedding(clip_model, preprocess, gen_image)
-                        save_gen_image_path = os.path.join(t2i_image_path,str(len(os.listdir(t2i_image_path))))
-                        os.makedirs(save_gen_image_path)
-                        torch.save(gen_image_embedding, os.path.join(save_gen_image_path, "image_embedding.pt"))
-                        gen_image.save(os.path.join(save_gen_image_path, "image.png"))
-                        del gen_image, gen_image_embedding
-                        torch.cuda.empty_cache()
-                        num_gen_images += 1
-                        if num_gen_images > num_images: break
-                if num_gen_images > num_images: break
+                            gen_image_embedding = self.get_image_embedding(clip_model, preprocess, gen_image)
+                            save_gen_image_path = os.path.join(t2i_image_path,str(len(os.listdir(t2i_image_path))))
+                            os.makedirs(save_gen_image_path)
+                            torch.save(gen_image_embedding, os.path.join(save_gen_image_path, "image_embedding.pt"))
+                            gen_image.save(os.path.join(save_gen_image_path, "image.png"))                        
+                            num_gen_images += 1
+                            if num_gen_images == num_images: break

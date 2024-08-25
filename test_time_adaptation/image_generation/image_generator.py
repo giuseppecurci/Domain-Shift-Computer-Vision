@@ -3,6 +3,7 @@ import json
 import os
 import ollama # if ollama is not available, install by executing the intall_and_run_ollama.sh script
 from tqdm import tqdm
+import clip
 
 class ImageGenerator:
     """
@@ -25,32 +26,21 @@ class ImageGenerator:
     def get_model(self):
         print(self.__model)
 
-    def save_image_and_embedding(self, image_tensor, embedding_tensor, file_path):
-        """
-        Save an image tensor and its corresponding embedding tensor in the same file.
+    def get_text_embedding(self,clip_model, text):
+        text_token = clip.tokenize("I like fish").cuda()
+        text_embedding = clip_model.encode_text(text_token).float()
+        return text_embedding 
+        
+    def generate_prompts(self, num_prompts, style_of_picture, path, context_llm, clip_text_encoder = "ViT-L/14"):
 
-        Args:
-            image_tensor (torch.Tensor): The tensor representing the image.
-            embedding_tensor (torch.Tensor): The tensor representing the embedding.
-            file_path (str): The path where the file will be saved.
-        """
-        # Create a dictionary to store both tensors
-        data = {
-            'image': image_tensor,
-            'embedding': embedding_tensor
-        }
-
-        # Save the dictionary to the specified file path
-        torch.save(data, file_path)
-
-    def generate_prompts(self, num_prompts, style_of_picture, path, context_llm = None):
-
-        if context_llm is None:
-            context_llm_path = "/home/sagemaker-user/Domain-Shift-Computer-Vision/test_time_adaptation/image_generation/llm_context.json"
-            with open(context_llm_path, 'r') as file:
+        if isinstance(context_llm,str):
+            with open(context_llm, 'r') as file:
                 context_llm = json.load(file) 
 
         skipped_classes = []
+
+        clip_model, _ = clip.load(clip_text_encoder)
+        clip_model.cuda().eval()
         
         for class_name in tqdm(os.listdir(path), desc="Processing classes"):
             prompts_generation_instruction = {
@@ -82,8 +72,10 @@ class ImageGenerator:
                     new_sub_dir = os.path.join(path, class_name, str(i))
                     os.makedirs(new_sub_dir, exist_ok=True)
                     prompt = content[i - len(sub_dir_class)]
+                    prompt_embedding = self.get_text_embedding(clip_model, prompt)
                     with open(os.path.join(new_sub_dir, "prompt.txt"), 'w') as file:
                         file.write(prompt)
+                    torch.save(prompt_embedding, os.path.join(new_sub_dir,"prompt_clip_embedding.pt"))
             else:
                 skipped_classes.append(class_name)
                 print(f"Skipping class {class_name}.")

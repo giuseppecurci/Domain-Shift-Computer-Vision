@@ -1,8 +1,11 @@
-import torch
 import json
 import os
-import ollama # if ollama is not available, install by executing the intall_and_run_ollama.sh script
 from tqdm import tqdm
+import random
+
+import torch
+import ollama # if ollama is not available, install by executing the intall_and_run_ollama.sh script
+from PIL import Image
 import clip
 
 class ImageGenerator:
@@ -27,12 +30,13 @@ class ImageGenerator:
         print(self.__model)
 
     def get_text_embedding(self,clip_model, text):
-        text_token = clip.tokenize("I like fish").cuda()
+        text_token = clip.tokenize(text).cuda()
         text_embedding = clip_model.encode_text(text_token).float()
+        text_embedding /= text_embedding.norm()
         return text_embedding 
         
     def generate_prompts(self, num_prompts, style_of_picture, path, context_llm, clip_text_encoder = "ViT-L/14"):
-
+        
         if isinstance(context_llm,str):
             with open(context_llm, 'r') as file:
                 context_llm = json.load(file) 
@@ -79,42 +83,66 @@ class ImageGenerator:
             else:
                 skipped_classes.append(class_name)
                 print(f"Skipping class {class_name}.")
-                
+
         return skipped_classes
-            
-    def generate_images(self, num_images):
-        """
-        _summary_
 
-        Args:
-            LM (_type_): _description_
-        """
-        assert isinstance(num_images,int) and num_images >= 1, "num_samples must be >1 and int" 
-        data_path = "/home/sagemaker-user/Domain-Shift-Computer-Vision/utility/data/st_images"
-        os.makedirs(data_path, exist_ok=True)
+    def get_image_embedding(self,clip_model, preprocess, image):
+        image_preprocessed = preprocess(image).unsqueeze(0).cuda()
+        image_embedding = clip_model.encode_image(image_preprocessed)
+        image_embedding /= image_embedding.norm()
+        return image_embedding
         
-        # Generate prompt sequences for each class in ImageNet
-        prompts = {}
-        for class_id, class_name in classes.items():
-            # Generate a response using the LLM model
-            question = f"Can you generate {self._LLM['num_samples']} sentences having as subject {class_name}?"
-            response = generate(self._LLM['model_name'], question)
-            response = response['response']
+    def generate_images(self, path, num_images, image_generation_pipeline, num_inference_steps, guidance_scale, strength=None, clip_image_encoder = "ViT-L/14"):
+        
+        assert image_generation_pipeline.__class__.__name__ in ("StableDiffusionPipeline", "StableDiffusionImg2ImgPipeline"), "image_generation_pipeline must be one of StableDiffusionPipeline or StableDiffusionImg2ImgPipeline"
 
-            # NOT TESTED
-            # Extract the prompt sequences from the response
-            sequences = [item['text'] for item in response]
+        random.seed(42)
+        torch.manual_seed(42)
 
-            # Create a directory for the current class
-            class_dir = os.path.join(data_path, class_id)
-            os.makedirs(class_dir, exist_ok=True)
-
-            # Generate images for each prompt sequence
-            for i, sequence in enumerate(sequences):
-                # Generate an image for the current prompt sequence
-                image = None  # Replace this with the code to generate an image from the prompt sequence
-                embed = None # Replace this with the code to generate an embedding from the prompt sequence
-
-                # Save the image and embedding to a file
-                file_path = os.path.join(class_dir, f'image_{i}.pt')
-                self._save_image_and_embedding(image, embed, file_path)
+        print("Loading CLIP model...")
+        clip_model, preprocess = clip.load(clip_image_encoder)
+        clip_model.cuda().eval()
+        
+        for class_name in tqdm(os.listdir(path), desc="Processing classes"):
+            class_path = os.path.join(path, class_name)
+            num_prompts = len(os.listdir(class_path))
+            if image_generation_pipeline.__class__.__name__ == "StableDiffusionImg2ImgPipeline":
+                scraped_image_paths = os.path.join(class_path, "scraped_images")
+                scraped_images = []
+                for scraped_image_path in scraped_image_paths:
+                    scraped_image = Image.open(scraped_image_path)
+                    scraped_image = scraped_image.resize((512,512))
+                    scraped_images.append(scraped_image)
+            num_prompts = len(os.listdir(class_path))
+            n_perm = num_images / num_prompts
+            for gen_images_class in tqdm(os.listdir(class_path), desc="Generating images"):
+                gen_image_class = os.path.join(class_path,gen_images_class)
+                with open(os.join.path(gen_image_class, "prompt.txt"), 'r') as file:
+                    text_prompt = file.read(file)
+                if image_generation_pipeline.__class__.__name__ == "StableDiffusionImg2ImgPipeline":
+                    i2i_image_path = os.path.join(gen_image_class,"i2i_gen_images")
+                    os.makedirs(i2i_image_path,exists_ok=True)
+                    for _ in tqdm(range(n_perm), desc="Generating Img2Img images"):
+                        scraped_image = random.sample(scraped_images,1)
+                        gen_image = image_generation_pipeline(prompt=text_prompt,
+                                                              image=scraped_image,
+                                                              strength=strength,
+                                                              guidance_scale=guidance_scale,
+                                                              num_inference_steps=num_inference_steps).images
+                        gen_image_embedding = self.get_image_embedding(clip_model, preprocess, gen_image)
+                        save_gen_image_path = os.join.path(i2i_image_path,len(os.listdir(i2i_image_path)))
+                        torch.save(gen_image_embedding, os.join.path(save_gen_image_path, "image_embedding.pt"))
+                        gen_image.save(os.join.path(save_gen_image_path, "image.png"))
+                else:
+                    t2i_image_path = os.path.join(gen_image_class,"t2i_gen_images")
+                    os.makedirs(t2i_image_path,exists_ok=True)
+                    for _ in tqdm(range(n_perm), desc="Generating Text2Img images"):
+                        gen_image = image_generation_pipeline(prompt=text_prompt,
+                                                              strength=strength,
+                                                              guidance_scale=guidance_scale,
+                                                              num_inference_steps=num_inference_steps).images
+                        gen_image_embedding = self.get_image_embedding(clip_model, preprocess, gen_image)
+                        save_gen_image_path = os.join.path(t2i_image_path,len(os.listdir(i2i_image_path)))
+                        torch.save(gen_image_embedding, os.join.path(save_gen_image_path, "image_embedding.pt"))
+                        gen_image.save(os.join.path(save_gen_image_path, "image.png"))
+                

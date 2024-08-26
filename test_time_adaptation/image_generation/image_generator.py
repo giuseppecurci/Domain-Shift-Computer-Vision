@@ -9,6 +9,8 @@ import math
 import ollama # if ollama is not available, install by executing the intall_and_run_ollama.sh script
 from PIL import Image
 import clip
+import torchvision.transforms as T
+import torch.nn.functional as F
 
 class ImageGenerator:
     """
@@ -95,7 +97,14 @@ class ImageGenerator:
         image_embedding /= image_embedding.norm()
         return image_embedding
         
-    def generate_images(self, path, num_images, image_generation_pipeline, num_inference_steps, guidance_scale = 9, strength=1, clip_image_encoder = "ViT-L/14"):
+    def generate_images(self, 
+                        path, 
+                        num_images, 
+                        image_generation_pipeline, 
+                        num_inference_steps, 
+                        guidance_scale = 9, 
+                        strength=1, 
+                        clip_image_encoder = "ViT-L/14"):
         
         assert image_generation_pipeline.__class__.__name__ in ("StableDiffusionPipeline", "StableDiffusionImg2ImgPipeline"), "image_generation_pipeline must be one of StableDiffusionPipeline or StableDiffusionImg2ImgPipeline"
 
@@ -162,3 +171,86 @@ class ImageGenerator:
                             gen_image.save(os.path.join(save_gen_image_path, "image.png"))                        
                             num_gen_images += 1
                             if num_gen_images == num_images: break
+
+def retrieve_gen_images(img,  
+                        num_images, 
+                        clip_model, 
+                        preprocess,
+                        img_to_tensor_pipe,
+                        data_path = "/home/sagemaker-user/Domain-Shift-Computer-Vision/imagenetA_generated",
+                        use_t2i_similarity = False, 
+                        t2i_images = True, 
+                        i2i_images = False, 
+                        threshold = 0.):
+
+        assert i2i_images or t2i_images, "One of t2i_images and i2i_images must be true"
+        assert isinstance(use_t2i_similarity, bool), "use_t2i_similarity must be a bool"
+        assert isinstance(t2i_images, bool), "t2i_images must be a bool"
+        assert isinstance(i2i_images, bool), "i2i_images must be a bool"
+        assert isinstance(num_images, int), "num_images must be an int"
+        assert isinstance(threshold, float) and 0 < threshold < 1, "threshold must be a float and between 0 and 1"
+        
+        if isinstance(img, torch.Tensor):
+            img = T.ToPILImage()(img)
+
+        retrieved_images_paths = []
+        retrieved_images_similarity = torch.zeros(num_images)
+        with torch.no_grad():
+            image_embedding = clip_model.encode_image(preprocess(img).unsqueeze(0).cuda())
+            image_embedding /= image_embedding.norm()
+        
+        for class_name in os.listdir(data_path):
+            class_path = os.path.join(data_path, class_name)
+            for gen_images_class in os.listdir(class_path):
+                gen_images_class_path = os.path.join(class_path,gen_images_class)
+                gen_prompt_embedding = torch.load(os.path.join(gen_images_class_path, "prompt_clip_embedding.pt"))
+                t2i_similarity = F.cosine_similarity(image_embedding, gen_prompt_embedding)
+                if t2i_images:
+                    t2i_gen_images_main_path = os.path.join(gen_images_class_path,"t2i_gen_images")
+                    try: # needed bc some prompts don't have a corresponding image yet
+                        for t2i_images_paths in os.listdir(t2i_gen_images_main_path):
+                            t2i_image_path = os.path.join(t2i_gen_images_main_path,t2i_images_paths)
+                            gen_image_embedding = torch.load(os.path.join(t2i_image_path, "image_embedding.pt"))
+                            i2i_similarity = F.cosine_similarity(image_embedding, gen_image_embedding)
+                            if use_t2i_similarity:
+                                similarity = (i2i_similarity + t2i_similarity)/2 # avg similarity
+                            else:
+                                similarity = i2i_similarity
+                            if similarity < threshold: continue
+                            if len(retrieved_images_paths) < num_images:
+                                retrieved_images_similarity[len(retrieved_images_paths)] = similarity
+                                retrieved_images_paths.append(os.path.join(t2i_image_path, "image.png"))
+                            else:
+                                min_similarity, id_similarity = retrieved_images_similarity.min(dim=0)
+                                if similarity > min_similarity:
+                                    retrieved_images_similarity[id_similarity] = similarity
+                                    retrieved_images_paths[id_similarity] = os.path.join(t2i_image_path, "image.png")
+                    except:
+                        pass
+                if i2i_images:
+                    i2i_gen_images_main_path = os.path.join(gen_images_class_path,"i2i_gen_images")
+                    for i2i_images_paths in os.listdir(i2i_gen_images_main_path):
+                        i2i_image_path = os.path.join(i2i_gen_images_main_path,i2i_images_paths)
+                        gen_image_embedding = torch.load(os.path.join(i2i_image_path, "image_embedding.pt"))
+        
+                        i2i_similarity = F.cosine_similarity(image_embedding, gen_image_embedding)
+                        if use_t2i_similarity:
+                            similarity = (i2i_similarity + t2i_similarity)/2 # avg similarity
+                        else:
+                            similarity = i2i_similarity
+                        if similarity < threshold: continue
+                        if len(retrieved_images_paths) < num_images:
+                            retrieved_images_similarity[len(retrieved_images_paths)] = similarity
+                            retrieved_images_paths.append(os.path.join(t2i_image_path, "image.png"))
+                        else:
+                            min_similarity, id_similarity = retrieved_images_similarity.min(dim=0)
+                            if similarity > min_similarity:
+                                retrieved_images_similarity[id_similarity] = similarity
+                                retrieved_images_paths[id_similarity] = os.path.join(i2i_image_path, "image.png")
+
+        retrieved_images = []
+        for image_path in retrieved_images_paths:
+            retrieved_images.append(img_to_tensor_pipe(Image.open(image_path)))
+        retrieved_images = torch.stack(retrieved_images)
+            
+        return retrieved_images

@@ -11,6 +11,7 @@ import os
 import json
 import time
 from scipy import stats
+from PIL import Image
 
 class Tester:
     """
@@ -178,16 +179,26 @@ class Tester:
         """
         return get_test_augmentations(input, augmentations, num_augmentations, seed_augmentations)
 
-    def retrieve_synthetic_images(self):
+    def retrieve_generated_images(img, num_images, clip_model, preprocess, img_to_tensor_pipe, data_path, use_t2i_similarity, t2i_images, i2i_images,
+                                  threshold):
         """
-        Function to retrieve the synthetically generated images before test time using CLIP embeddings.
+        See image_generator.py.
         """
-        pass
-
+        return retrieve_gen_images(img,  
+                                   num_images, 
+                                   clip_model, 
+                                   preprocess,
+                                   img_to_tensor_pipe,
+                                   data_path = "/home/sagemaker-user/Domain-Shift-Computer-Vision/imagenetA_generated",
+                                   use_t2i_similarity = False, 
+                                   t2i_images = True, 
+                                   i2i_images = False, 
+                                   threshold = 0.)
+    
     def test(self,
              augmentations:list, 
              num_augmentations:int, 
-             seed_augmentations:int,  
+             seed_augmentations:int,
              img_root:str,
              lr_setting:list,
              weights_imagenet = None,
@@ -200,7 +211,8 @@ class Tester:
              prior_strength = -1,
              verbose = True,
              log_interval = 1,
-             MC = None):
+             MC = None,
+             use_generated_augmentations = False):
         """
         Main function to test a torchvision model with different test-time adaptation techniques 
         and keep track of the results and the experiment setting. 
@@ -305,7 +317,9 @@ class Tester:
                     end_time_augmentations = time.time()
                     time_dict["get_augmentations"] += (end_time_augmentations - start_time_augmentations)
 
-                    test_augmentations = test_augmentations.to(self.__device)
+                    if use_generated_augmentations:
+                        test_augmentations = test_augmentations.to(self.__device)
+                    
                     for _ in range(num_adaptation_steps):
                         logits = model(test_augmentations)
     

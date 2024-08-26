@@ -31,7 +31,7 @@ class ImageGenerator:
         text_embedding /= text_embedding.norm()
         return text_embedding 
         
-    def generate_prompts(self, num_prompts, style_of_picture, path, context_llm, llm_model = "llama3.1", clip_text_encoder = "ViT-L/14"):
+    def generate_prompts(self, num_prompts, style_of_picture, path, context_llm, max_prompts_per_class, llm_model = "llama3.1", clip_text_encoder = "ViT-L/14"):
 
         assert isinstance(model,str), "Model must be a str"
         try:
@@ -52,6 +52,7 @@ class ImageGenerator:
         clip_model.cuda().eval()
         
         for class_name in tqdm(os.listdir(path), desc="Processing classes"):
+            if len(os.listdir(os.path.join(path, class_name))) > max_prompts_per_class: continue
             prompts_generation_instruction = {
                 "role": "user",
                 "content": f"class:{class_name}, number of prompts:{num_prompts}, style of picture: {style_of_picture}"
@@ -74,7 +75,7 @@ class ImageGenerator:
                     counter_flag = -1
                 except Exception as e:
                     counter_flag -= 1
-
+            
             if counter_flag == -1:
                 sub_dir_class = os.listdir(os.path.join(path, class_name))
                 for i in range(len(sub_dir_class), num_prompts + len(sub_dir_class)):
@@ -85,6 +86,7 @@ class ImageGenerator:
                     with open(os.path.join(new_sub_dir, "prompt.txt"), 'w') as file:
                         file.write(prompt)
                     torch.save(prompt_embedding, os.path.join(new_sub_dir,"prompt_clip_embedding.pt"))
+                    if len(os.listdir(os.path.join(path, class_name))) >= max_prompts_per_class: break
             else:
                 skipped_classes.append(class_name)
                 print(f"Skipping class {class_name}.")
@@ -251,6 +253,6 @@ def retrieve_gen_images(img,
         retrieved_images = []
         for image_path in retrieved_images_paths:
             retrieved_images.append(img_to_tensor_pipe(Image.open(image_path)))
-        retrieved_images = torch.stack(retrieved_images)
+        retrieved_images = torch.stack(retrieved_images) if len(retrieved_images) >= 1 else None
             
         return retrieved_images

@@ -1,11 +1,13 @@
 import torch
 import torchvision.transforms as T
 import torch.nn.functional as F
+import clip
 
 from utility.data.get_data import get_data
 from test_time_adaptation.adaptive_bn import adaptive_bn_forward
 from test_time_adaptation.MEMO import compute_entropy, get_best_augmentations, get_test_augmentations
 from test_time_adaptation.resnet50_dropout import ResNet50Dropout
+from test_time_adaptation.image_generation.image_generator import retrieve_gen_images
 
 import os
 import json
@@ -24,7 +26,7 @@ class Tester:
         self.__device = device
         self.__exp_path = exp_path
 
-    def save_result(self, accuracy, path_result, num_augmentations, augmentations, seed_augmentations, top_augmentations, MEMO, num_adaptation_steps, lr_setting, weights, prior_strength, time_test, use_MC):
+    def save_result(self, accuracy, path_result, num_augmentations, augmentations, seed_augmentations, top_augmentations, MEMO, num_adaptation_steps, lr_setting, weights, prior_strength, time_test, use_MC, gen_aug_settings):
         """
         Takes all information of the experiment saves it in a json file stored at exp_path
         """
@@ -40,7 +42,8 @@ class Tester:
             "augmentations" : [str(augmentation) for augmentation in augmentations],
             "prior_strength" : prior_strength,
             "MC" : use_MC,
-            "time_test" : time_test
+            "time_test" : time_test,
+            "gen_aug_settings" : gen_aug_settings
         }
         try:
             with open(path_result, 'w') as json_file:
@@ -179,21 +182,20 @@ class Tester:
         """
         return get_test_augmentations(input, augmentations, num_augmentations, seed_augmentations)
 
-    def retrieve_generated_images(img, num_images, clip_model, preprocess, img_to_tensor_pipe, data_path, use_t2i_similarity, t2i_images, i2i_images,
-                                  threshold):
+    def retrieve_generated_images(self, img, num_images, clip_model, preprocess, img_to_tensor_pipe, data_path, use_t2i_similarity, t2i_images, i2i_images, threshold):
         """
         See image_generator.py.
         """
-        return retrieve_gen_images(img,  
-                                   num_images, 
-                                   clip_model, 
-                                   preprocess,
-                                   img_to_tensor_pipe,
-                                   data_path = "/home/sagemaker-user/Domain-Shift-Computer-Vision/imagenetA_generated",
-                                   use_t2i_similarity = False, 
-                                   t2i_images = True, 
-                                   i2i_images = False, 
-                                   threshold = 0.)
+        return retrieve_gen_images(img = img,  
+                                   num_images = num_images, 
+                                   clip_model = clip_model, 
+                                   preprocess = preprocess,
+                                   img_to_tensor_pipe = img_to_tensor_pipe,
+                                   data_path = data_path,
+                                   use_t2i_similarity = use_t2i_similarity, 
+                                   t2i_images = t2i_images, 
+                                   i2i_images = i2i_images, 
+                                   threshold = threshold)
     
     def test(self,
              augmentations:list, 
@@ -212,7 +214,7 @@ class Tester:
              verbose = True,
              log_interval = 1,
              MC = None,
-             use_generated_augmentations = False):
+             gen_aug_settings = None):
         """
         Main function to test a torchvision model with different test-time adaptation techniques 
         and keep track of the results and the experiment setting. 
@@ -243,11 +245,12 @@ class Tester:
             assert not (num_augmentations or top_augmentations), "If both MEMO and TTA are set to False, then top_augmentations and num_augmentations must be 0"
         assert not lr_setting if not MEMO else True, "If MEMO is false, then lr_setting must be None" 
         assert isinstance(prior_strength, (float,int)) , "Prior adaptation must be either a float or an int"
-
+        assert isinstance(gen_aug_settings, dict), "gen_aug_settings must be a dict containing settings to retrieve the generated images"
+        
         # get the name of the weigths used and define the name of the experiment 
         weights_name = str(weights_imagenet).split(".")[-1] if weights_imagenet else "MEMO_repo"
         use_MC = True if MC else False
-        name_result = f"MEMO_{MEMO}_AdaptSteps_{num_adaptation_steps}_adaptBN_{prior_strength}_TTA_{TTA}_aug_{num_augmentations}_topaug_{top_augmentations}_seed_aug_{seed_augmentations}_weights_{weights_name}_MC_{use_MC}"
+        name_result = f"MEMO_{MEMO}_AdaptSteps_{num_adaptation_steps}_adaptBN_{prior_strength}_TTA_{TTA}_aug_{num_augmentations}_topaug_{top_augmentations}_seed_aug_{seed_augmentations}_weights_{weights_name}_MC_{use_MC}_genAug_{bool(gen_aug_settings)}"
         path_result = os.path.join(self.__exp_path,name_result)
         assert not os.path.exists(path_result),f"MEMO test already exists: {path_result}"
 
@@ -283,7 +286,10 @@ class Tester:
 
         if dataset == "imagenetA":
             imagenetA_masking = self.get_imagenetA_masking()
-
+        
+        if gen_aug_settings:
+            clip_model, preprocess = clip.load(gen_aug_settings["clip_img_encoder"])
+        
         if prior_strength < 0:
             torch.nn.BatchNorm2d.prior_strength = 1
         else:
@@ -296,6 +302,7 @@ class Tester:
             "get_augmentations": 0.0,
             "confidence_selection": 0.0,
             "get_prediction": 0.0,
+            "get_gen_images" : 0.0,
             "total_time": 0.0
         }
 
@@ -317,8 +324,24 @@ class Tester:
                     end_time_augmentations = time.time()
                     time_dict["get_augmentations"] += (end_time_augmentations - start_time_augmentations)
 
-                    if use_generated_augmentations:
-                        test_augmentations = test_augmentations.to(self.__device)
+                    if gen_aug_settings:
+                        start_time_gen_augmentations = time.time()
+                        retrieved_gen_images = self.retrieve_generated_images(img = input, 
+                                                                              num_images = gen_aug_settings["num_img"], 
+                                                                              clip_model = clip_model, 
+                                                                              preprocess = preprocess, 
+                                                                              img_to_tensor_pipe = transform_loader, 
+                                                                              data_path = gen_aug_settings["gen_data_path"], 
+                                                                              use_t2i_similarity = gen_aug_settings["use_t2i_similarity"], 
+                                                                              t2i_images = gen_aug_settings["t2i_img"], 
+                                                                              i2i_images = gen_aug_settings["i2i_img"],
+                                                                              threshold = gen_aug_settings["threshold"])
+                        if retrieved_gen_images:
+                            test_augmentations = torch.cat([test_augmentations,retrieved_gen_images],dim=0)
+                        end_time_gen_augmentations = time.time()
+                        time_dict["get_gen_images"] += (end_time_gen_augmentations - start_time_gen_augmentations)
+                        
+                    test_augmentations = test_augmentations.to(self.__device)
                     
                     for _ in range(num_adaptation_steps):
                         logits = model(test_augmentations)
@@ -390,6 +413,7 @@ class Tester:
                          weights = weights_name,
                          prior_strength = prior_strength,
                          use_MC = use_MC,
-                         time_test = time_dict)
+                         time_test = time_dict,
+                         gen_aug_settings = gen_aug_settings)
 
         return accuracy

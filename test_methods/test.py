@@ -235,7 +235,7 @@ class Tester:
         # get the name of the weigths used and define the name of the experiment 
         weights_name = str(weights_imagenet).split(".")[-1] if weights_imagenet else "MEMO_repo"
         use_MC = True if MC else False
-        name_result = f"MEMO_{MEMO}AdaptSteps_{num_adaptation_steps}_adaptBN_{prior_strength}_TTA_{TTA}_aug_{num_augmentations}_topaug_{top_augmentations}_seed_aug_{seed_augmentations}_weights_{weights_name}_MC_{use_MC}"
+        name_result = f"MEMO_{MEMO}_AdaptSteps_{num_adaptation_steps}_adaptBN_{prior_strength}_TTA_{TTA}_aug_{num_augmentations}_topaug_{top_augmentations}_seed_aug_{seed_augmentations}_weights_{weights_name}_MC_{use_MC}"
         path_result = os.path.join(self.__exp_path,name_result)
         assert not os.path.exists(path_result),f"MEMO test already exists: {path_result}"
 
@@ -306,7 +306,7 @@ class Tester:
                     time_dict["get_augmentations"] += (end_time_augmentations - start_time_augmentations)
 
                     test_augmentations = test_augmentations.to(self.__device)
-                    for _ in (num_adaptation_steps):
+                    for _ in range(num_adaptation_steps):
                         logits = model(test_augmentations)
     
                         # apply imagenetA masking
@@ -349,23 +349,9 @@ class Tester:
                 start_time_prediction = time.time()
                 with torch.no_grad():
                     inputs = normalize_input(inputs)
-                    y_pred = self.get_prediction(inputs, model, imagenetA_masking, MC=MC)
-
-                    # Handle cases where targets or y_pred might be tuples
-                    if isinstance(targets, tuple):
-                        targets = targets[0]  # Extract the relevant tensor
-                    if isinstance(y_pred, tuple):
-                        y_pred = y_pred[0]  # Extract the relevant tensor
-
-                    if targets.dim() == 0 or y_pred.dim() == 0:
-                        # If both targets and y_pred are scalars
-                        correct_predictions = int(targets == y_pred)
-                    else:
-                        # If targets and y_pred are tensors
-                        correct_predictions = (targets == y_pred).sum().item()
-
-                cumulative_accuracy += correct_predictions
-
+                    y_pred, _ = self.get_prediction(inputs, model, imagenetA_masking, MC=MC)
+                    correct_predictions = (targets == y_pred).sum().item()
+                    cumulative_accuracy += correct_predictions
                 end_time_prediction = time.time()
                 time_dict["get_prediction"] += (end_time_prediction - start_time_prediction)
 

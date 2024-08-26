@@ -15,7 +15,7 @@ from scipy import stats
 class Tester:
     """
     A class to run all the experiments. It stores all the informations to reproduce the experiments in a json file
-    at exp_path. 
+    at exp_path.
     """
     def __init__(self, model, optimizer, exp_path, device):
         self.__model = model
@@ -226,10 +226,10 @@ class Tester:
                       after each batch a new value is displayed. 
         """
         # check some basic conditions
-        assert bool(num_adaptation_steps) == MEMO, "When using MEMO adaptation steps should be >1, otherwise equal to 0."  
+        assert bool(num_adaptation_steps) == MEMO, "When using MEMO adaptation steps should be > 1, otherwise equal to 0."  
         if not (MEMO or TTA):
-            assert not (num_augmentations or top_augmentations), "If both MEMO and TTA are set to False, then top_augmentations must be 0"
-        assert not (weights_imagenet or lr_setting) if not MEMO else True, "If MEMO is false, then lr_setting and weights_imagenet must be None" 
+            assert not (num_augmentations or top_augmentations), "If both MEMO and TTA are set to False, then top_augmentations and num_augmentations must be 0"
+        assert not lr_setting if not MEMO else True, "If MEMO is false, then lr_setting must be None" 
         assert isinstance(prior_strength, (float,int)) , "Prior adaptation must be either a float or an int"
 
         # get the name of the weigths used and define the name of the experiment 
@@ -349,8 +349,23 @@ class Tester:
                 start_time_prediction = time.time()
                 with torch.no_grad():
                     inputs = normalize_input(inputs)
-                    y_pred = self.get_prediction(inputs, model, imagenetA_masking)
-                    cumulative_accuracy += (y_pred == targets).sum().item()
+                    y_pred = self.get_prediction(inputs, model, imagenetA_masking, MC=MC)
+
+                    # Handle cases where targets or y_pred might be tuples
+                    if isinstance(targets, tuple):
+                        targets = targets[0]  # Extract the relevant tensor
+                    if isinstance(y_pred, tuple):
+                        y_pred = y_pred[0]  # Extract the relevant tensor
+
+                    if targets.dim() == 0 or y_pred.dim() == 0:
+                        # If both targets and y_pred are scalars
+                        correct_predictions = int(targets == y_pred)
+                    else:
+                        # If targets and y_pred are tensors
+                        correct_predictions = (targets == y_pred).sum().item()
+
+                cumulative_accuracy += correct_predictions
+
                 end_time_prediction = time.time()
                 time_dict["get_prediction"] += (end_time_prediction - start_time_prediction)
 

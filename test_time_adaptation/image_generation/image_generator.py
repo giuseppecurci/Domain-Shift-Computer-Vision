@@ -31,9 +31,9 @@ class ImageGenerator:
         text_embedding /= text_embedding.norm()
         return text_embedding 
         
-    def generate_prompts(self, num_prompts, style_of_picture, path, context_llm, max_prompts_per_class, llm_model = "llama3.1", clip_text_encoder = "ViT-L/14"):
+    def generate_prompts(self, num_prompts_per_class, style_of_picture, path, context_llm, llm_model = "llama3.1", clip_text_encoder = "ViT-L/14"):
 
-        assert isinstance(model,str), "Model must be a str"
+        assert isinstance(llm_model,str), "Model must be a str"
         try:
           ollama.chat(llm_model)
         except ollama.ResponseError as e:
@@ -50,46 +50,49 @@ class ImageGenerator:
 
         clip_model, _ = clip.load(clip_text_encoder)
         clip_model.cuda().eval()
-        
-        for class_name in tqdm(os.listdir(path), desc="Processing classes"):
-            if len(os.listdir(os.path.join(path, class_name))) > max_prompts_per_class: continue
-            prompts_generation_instruction = {
-                "role": "user",
-                "content": f"class:{class_name}, number of prompts:{num_prompts}, style of picture: {style_of_picture}"
-            }
-        
-            if len(context_llm) == 3:
-                context_llm.append(prompts_generation_instruction)
-            else:
-                context_llm[3] = prompts_generation_instruction
+
+        with torch.no_grad():
+            for class_name in tqdm(os.listdir(path), desc="Processing classes"):
+                sub_dir_class = os.path.join(path, class_name)
+                prompts_to_generate = num_prompts_per_class - len(os.listdir(sub_dir_class))
+                if prompts_to_generate <= 0: continue
+                    
+                prompts_generation_instruction = {
+                    "role": "user",
+                    "content": f"class:{class_name}, number of prompts:{prompts_to_generate}, style of picture: {style_of_picture}"
+                }
             
-            counter_flag = 3
-            while counter_flag>0:
-                try:
-                    response = ollama.chat(model=self.__model, messages=context_llm)
-                    content = json.loads(response['message']['content'])  # json.loads to convert str to list
-                    assert len(content) == num_prompts, (
-                        "The model failed to generate the number of prompts requested. "
-                        "Try to run the command again or consider changing context_llm"
-                    )
-                    counter_flag = -1
-                except Exception as e:
-                    counter_flag -= 1
-            
-            if counter_flag == -1:
-                sub_dir_class = os.listdir(os.path.join(path, class_name))
-                for i in range(len(sub_dir_class), num_prompts + len(sub_dir_class)):
-                    new_sub_dir = os.path.join(path, class_name, str(i))
-                    os.makedirs(new_sub_dir, exist_ok=True)
-                    prompt = content[i - len(sub_dir_class)]
-                    prompt_embedding = self.get_text_embedding(clip_model, prompt)
-                    with open(os.path.join(new_sub_dir, "prompt.txt"), 'w') as file:
-                        file.write(prompt)
-                    torch.save(prompt_embedding, os.path.join(new_sub_dir,"prompt_clip_embedding.pt"))
-                    if len(os.listdir(os.path.join(path, class_name))) >= max_prompts_per_class: break
-            else:
-                skipped_classes.append(class_name)
-                print(f"Skipping class {class_name}.")
+                if len(context_llm) == 3:
+                    context_llm.append(prompts_generation_instruction)
+                else:
+                    context_llm[3] = prompts_generation_instruction
+                
+                counter_flag = 6
+                while counter_flag>0:
+                    try:
+                        response = ollama.chat(model=llm_model, messages=context_llm)
+                        content = json.loads(response['message']['content'])  # json.loads to convert str to list
+                        assert len(content) == prompts_to_generate, (
+                            "The model failed to generate the number of prompts requested. "
+                            "Try to run the command again or consider changing context_llm"
+                        )
+                        counter_flag = -1
+                    except Exception as e:
+                        counter_flag -= 1
+                
+                if counter_flag == -1:
+                    num_prompts_already_gen = len(os.listdir(sub_dir_class))
+                    for i in range(num_prompts_already_gen, num_prompts_already_gen + prompts_to_generate):
+                        new_sub_dir = os.path.join(path, class_name, str(i))
+                        os.makedirs(new_sub_dir, exist_ok=True)
+                        prompt = content[i - num_prompts_already_gen]
+                        prompt_embedding = self.get_text_embedding(clip_model, prompt)
+                        with open(os.path.join(new_sub_dir, "prompt.txt"), 'w') as file:
+                            file.write(prompt)
+                        torch.save(prompt_embedding, os.path.join(new_sub_dir,"prompt_clip_embedding.pt"))
+                else:
+                    skipped_classes.append(class_name)
+                    print(f"Skipping class {class_name}.")
 
         return skipped_classes
     

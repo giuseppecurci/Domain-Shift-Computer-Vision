@@ -114,7 +114,7 @@ class ImageGenerator:
         
     def generate_images(self, 
                         path, 
-                        num_images, 
+                        num_images_per_class, 
                         image_generation_pipeline, 
                         num_inference_steps, 
                         guidance_scale = 9, 
@@ -130,62 +130,63 @@ class ImageGenerator:
         clip_model.cuda().eval()
 
         os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
-        for class_name in tqdm(os.listdir(path), desc="Processing classes"):
-            mem_allocated_before = torch.cuda.memory_allocated() 
-            mem_reserved_before = torch.cuda.memory_reserved() 
-            class_path = os.path.join(path, class_name)
-            num_prompts = len(os.listdir(class_path))
-            if image_generation_pipeline.__class__.__name__ == "StableDiffusionImg2ImgPipeline":
-                print("Loading scraped images...")
-                scraped_image_paths = os.path.join(class_path, "scraped_images")
-                scraped_images = []
-                for scraped_image_path in scraped_image_paths:
-                    scraped_image = Image.open(scraped_image_path)
-                    scraped_image = scraped_image.resize((512,512))
-                    scraped_images.append(scraped_image)
-            num_prompts = len(os.listdir(class_path))
-            n_perm = math.ceil(num_images / num_prompts)
-            num_gen_images = 0 # needed if num_images < num_prompts
-            for gen_images_class in os.listdir(class_path):
-                if num_gen_images == num_images: break
-                gen_image_class = os.path.join(class_path,gen_images_class)
-                with open(os.path.join(gen_image_class, "prompt.txt"), 'r') as file:
-                    text_prompt = file.read()
+        class_list = os.listdir(path)
+        with tqdm(total=len(class_list), desc="Processing classes") as pbar:
+            for class_name in class_list:
+                pbar.set_description(f"Processing class: {class_name}")
+                class_path = os.path.join(path, class_name)
+                num_prompts = len(os.listdir(class_path))
+                
                 if image_generation_pipeline.__class__.__name__ == "StableDiffusionImg2ImgPipeline":
-                    i2i_image_path = os.path.join(gen_image_class,"i2i_gen_images")
-                    os.makedirs(i2i_image_path,exist_ok=True)
-                    for _ in range(n_perm):
-                        scraped_image = random.sample(scraped_images,1)[0]
-                        with torch.no_grad():
-                            gen_image = image_generation_pipeline(prompt=text_prompt,
-                                                                  image=scraped_image,
-                                                                  strength=strength,
-                                                                  guidance_scale=guidance_scale,
-                                                                  num_inference_steps=num_inference_steps).images[0]
-                            del scraped_image
-                            gen_image_embedding = self.get_image_embedding(clip_model, preprocess, gen_image)
-                            save_gen_image_path = os.path.join(i2i_image_path,str(len(os.listdir(i2i_image_path))))
-                            os.makedirs(save_gen_image_path)
-                            torch.save(gen_image_embedding, os.path.join(save_gen_image_path, "image_embedding.pt"))
-                            gen_image.save(os.path.join(save_gen_image_path, "image.png"))
-                            num_gen_images += 1
-                            if num_gen_images == num_images: break
-                else:
-                    t2i_image_path = os.path.join(gen_image_class,"t2i_gen_images")
-                    os.makedirs(t2i_image_path,exist_ok=True)
-                    for _ in range(n_perm):
-                        with torch.no_grad():
-                            gen_image = image_generation_pipeline(prompt=text_prompt,
-                                                                  strength=strength,
-                                                                  guidance_scale=guidance_scale,
-                                                                  num_inference_steps=num_inference_steps).images[0]
-                            gen_image_embedding = self.get_image_embedding(clip_model, preprocess, gen_image)
-                            save_gen_image_path = os.path.join(t2i_image_path,str(len(os.listdir(t2i_image_path))))
-                            os.makedirs(save_gen_image_path)
-                            torch.save(gen_image_embedding, os.path.join(save_gen_image_path, "image_embedding.pt"))
-                            gen_image.save(os.path.join(save_gen_image_path, "image.png"))                        
-                            num_gen_images += 1
-                            if num_gen_images == num_images: break
+                    print("Loading scraped images...")
+                    scraped_image_paths = os.path.join(class_path, "scraped_images") # go in scraped_images folder
+                    scraped_images = []
+                    for scraped_image_path in os.listdir(scraped_image_paths): # open and append scraped images
+                        img_path = os.path.join(scraped_image_paths,scraped_image_path)
+                        scraped_image = Image.open(img_path)
+                        scraped_image = scraped_image.resize((512,512))
+                        scraped_images.append(scraped_image)
+                
+                num_gen_images = 0 # needed if num_images < num_prompts
+
+                while num_gen_images < num_images_per_class:
+                    for gen_images_class in os.listdir(class_path):
+                        if gen_images_class == "scraped_images": continue
+                        gen_image_class = os.path.join(class_path,gen_images_class)
+                        with open(os.path.join(gen_image_class, "prompt.txt"), 'r') as file:
+                            text_prompt = file.read()
+                        if image_generation_pipeline.__class__.__name__ == "StableDiffusionImg2ImgPipeline":
+                            i2i_image_path = os.path.join(gen_image_class,"i2i_gen_images")
+                            os.makedirs(i2i_image_path,exist_ok=True)
+                            scraped_image = random.sample(scraped_images,1)[0]
+                            with torch.no_grad():
+                                gen_image = image_generation_pipeline(prompt=text_prompt,
+                                                                        image=scraped_image,
+                                                                        strength=strength,
+                                                                        guidance_scale=guidance_scale,
+                                                                        num_inference_steps=num_inference_steps).images[0]
+                                gen_image_embedding = self.get_image_embedding(clip_model, preprocess, gen_image)
+                                save_gen_image_path = os.path.join(i2i_image_path,str(len(os.listdir(i2i_image_path))))
+                                os.makedirs(save_gen_image_path)
+                                torch.save(gen_image_embedding, os.path.join(save_gen_image_path, "image_embedding.pt"))
+                                gen_image.save(os.path.join(save_gen_image_path, "image.png"))
+                                num_gen_images += 1
+                        else:
+                            t2i_image_path = os.path.join(gen_image_class,"t2i_gen_images")
+                            os.makedirs(t2i_image_path,exist_ok=True)
+                            with torch.no_grad():
+                                gen_image = image_generation_pipeline(prompt=text_prompt,
+                                                                        strength=strength,
+                                                                        guidance_scale=guidance_scale,
+                                                                        num_inference_steps=num_inference_steps).images[0]
+                                gen_image_embedding = self.get_image_embedding(clip_model, preprocess, gen_image)
+                                save_gen_image_path = os.path.join(t2i_image_path,str(len(os.listdir(t2i_image_path))))
+                                os.makedirs(save_gen_image_path)
+                                torch.save(gen_image_embedding, os.path.join(save_gen_image_path, "image_embedding.pt"))
+                                gen_image.save(os.path.join(save_gen_image_path, "image.png"))                        
+                                num_gen_images += 1
+                        if num_gen_images == num_images_per_class: break
+                pbar.update(1)
 
 def retrieve_gen_images(img,  
                         num_images, 
@@ -217,31 +218,29 @@ def retrieve_gen_images(img,
         for class_name in os.listdir(data_path):
             class_path = os.path.join(data_path, class_name)
             for gen_images_class in os.listdir(class_path):
+                if gen_images_class == "scraped_images": continue
                 gen_images_class_path = os.path.join(class_path,gen_images_class)
                 gen_prompt_embedding = torch.load(os.path.join(gen_images_class_path, "prompt_clip_embedding.pt"))
                 t2i_similarity = F.cosine_similarity(image_embedding, gen_prompt_embedding)
                 if t2i_images:
                     t2i_gen_images_main_path = os.path.join(gen_images_class_path,"t2i_gen_images")
-                    try: # needed bc some prompts don't have a corresponding image yet
-                        for t2i_images_paths in os.listdir(t2i_gen_images_main_path):
-                            t2i_image_path = os.path.join(t2i_gen_images_main_path,t2i_images_paths)
-                            gen_image_embedding = torch.load(os.path.join(t2i_image_path, "image_embedding.pt"))
-                            i2i_similarity = F.cosine_similarity(image_embedding, gen_image_embedding)
-                            if use_t2i_similarity:
-                                similarity = (i2i_similarity + t2i_similarity)/2 # avg similarity
-                            else:
-                                similarity = i2i_similarity
-                            if similarity < threshold: continue
-                            if len(retrieved_images_paths) < num_images:
-                                retrieved_images_similarity[len(retrieved_images_paths)] = similarity
-                                retrieved_images_paths.append(os.path.join(t2i_image_path, "image.png"))
-                            else:
-                                min_similarity, id_similarity = retrieved_images_similarity.min(dim=0)
-                                if similarity > min_similarity:
-                                    retrieved_images_similarity[id_similarity] = similarity
-                                    retrieved_images_paths[id_similarity] = os.path.join(t2i_image_path, "image.png")
-                    except:
-                        pass
+                    for t2i_images_paths in os.listdir(t2i_gen_images_main_path):
+                        t2i_image_path = os.path.join(t2i_gen_images_main_path,t2i_images_paths)
+                        gen_image_embedding = torch.load(os.path.join(t2i_image_path, "image_embedding.pt"))
+                        i2i_similarity = F.cosine_similarity(image_embedding, gen_image_embedding)
+                        if use_t2i_similarity:
+                            similarity = (i2i_similarity + t2i_similarity)/2 # avg similarity
+                        else:
+                            similarity = i2i_similarity
+                        if similarity < threshold: continue
+                        if len(retrieved_images_paths) < num_images:
+                            retrieved_images_similarity[len(retrieved_images_paths)] = similarity
+                            retrieved_images_paths.append(os.path.join(t2i_image_path, "image.png"))
+                        else:
+                            min_similarity, id_similarity = retrieved_images_similarity.min(dim=0)
+                            if similarity > min_similarity:
+                                retrieved_images_similarity[id_similarity] = similarity
+                                retrieved_images_paths[id_similarity] = os.path.join(t2i_image_path, "image.png")
                 if i2i_images:
                     i2i_gen_images_main_path = os.path.join(gen_images_class_path,"i2i_gen_images")
                     for i2i_images_paths in os.listdir(i2i_gen_images_main_path):

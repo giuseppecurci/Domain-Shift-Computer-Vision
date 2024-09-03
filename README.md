@@ -8,26 +8,34 @@ This repository contains code for experiments conducted, methods utilized, and u
 
 ```
 ├── example.ipynb
-├── experiments
-│   └── Resnet50_ImagenetA_SGD
-│   ┆   ├── model:resnet50_weights:IMAGENET1K_V1_seed_aug:42_aug:16_topaug:8_MEMO:False
-│   ┆   ┆
-│   ┆   └── model:resnet50_weights:IMAGENET1K_V1_seed_aug:42_aug:16_topaug:8_MEMO:True_priorBN:16.0
-│   ┆
+├── notebook_report.ipynb
 ├── images
 ├── test_methods
 │   └── test.py
 ├── test_time_adaptation
+│   ├── adaptive_bn.py
 │   ├── MEMO.py
-│   └── adaptive_bn.py
+│   ├── resnet50_dropout.py
+│   └── image_generation
+│       │── image_generator.py
+│       │── define_dir.py
+│       │── web_scrape.py
+│       │── install_and_run_ollama.sh
+│       └── llm_context.json
 └── utility
     ├── data
+    │   │── get_data.py
+    │   │── imagenetA_masking.json
+    │   │── dropout_positions.json
+    │   └── imagenetA_classes.json
     └── gradcam
         ├── activations_and_gradients.py
         ┆
 ```
  
 ## Methods Implemented
+
+For more details and the results of all the experiments check `notebook_report.ipynb`.
 
 <br>
 
@@ -45,7 +53,6 @@ Paper: [(M. Zhang, S. Levine, C. Finn, 2022)](https://proceedings.neurips.cc/pap
 - **Batch-Normalization Adaptation**: Proposed by [Schneider et al., 2020](https://proceedings.neurips.cc/paper/2020/hash/85690f81aadc1749175c187784afc9ee-Abstract.html), it involves updating the statistics (mean and variance) used in Batch Normalization layers during inference to better match the distribution of the new test data. The adaptation is performed using one test point and is controlled by a prior strength hyperparameter.
 
 <br>
-
 
 - **Efficient DiffTPT**: Traditional data augmentation methods are limited by insufficient data diversity. We re-adapt the DiffTPT method proposed by [(C. Feng, K. Yu, 2023)](https://ieeexplore.ieee.org/document/10376616/) to use it with MEMO. 
 
@@ -66,8 +73,6 @@ However, DiffTPT relies on the CLIP image encoder to generate new images, which 
 5. **Cosine Similarity for Retrieval**: At test time, use cosine similarity between the image embeddings of the previously generated images and/or the text embeddings to retrieve the most similar images. This method is computationally less expensive than generating new images for each test sample and it should still enhance accuracy. For example, while our number of generated images is fixed and does not depend on the number of samples to classify, the original method scales linearly with it. Which means that for the `Imagenet-A`, assuming 64 augmentations per sample, one needs to produce a total of 480,000 images, nearly 50 times the ones we used. Thus, not only our method is much more efficient and expensive, but it's also significantly faster assuming the same computational power. 
 
 6. **Data Augmentation**: Augmented data is incorporated using both conventional methods and pre-trained stable diffusion models, albeit with varying percentages.
-
-For more details and the results of all the experiments check `notebook_report.ipynb`.
 
 <p align="center">
   <img src="images/image_generation_pipeline_colored.jpg" width="600" height="300">  

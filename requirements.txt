@@ -1,0 +1,13 @@
+bing_image_downloader==1.1.2
+boto3==1.35.10
+clip==0.2.0
+diffusers==0.30.2
+numpy==2.1.0
+ollama==0.3.2
+opencv_python==4.9.0.80
+Pillow==10.4.0
+scipy==1.14.1
+torch==2.3.0+cu118
+torchvision==0.18.0+cu118
+tqdm==4.66.4
+ttach==0.0.3

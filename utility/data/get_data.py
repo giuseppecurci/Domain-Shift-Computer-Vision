@@ -6,10 +6,6 @@ from PIL import Image
 import torch
 import torchvision
 
-import numpy as np
-from collections import defaultdict
-from torch.utils.data import DataLoader, Subset
-
 class S3ImageFolder(Dataset):
     """
     Function to pull dataset from an AmazonS3 bucket. 

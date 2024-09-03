@@ -4,8 +4,16 @@ from io import BytesIO
 from pathlib import Path
 from PIL import Image
 import torch
+import torchvision
+
+import numpy as np
+from collections import defaultdict
+from torch.utils.data import DataLoader, Subset
 
 class S3ImageFolder(Dataset):
+    """
+    Function to pull dataset from an AmazonS3 bucket. 
+    """
     def __init__(self, root, transform=None):
         self.s3_bucket = "deeplearning2024-datasets" # name of the bucket
         self.s3_region = "eu-west-1" # Ireland
@@ -68,9 +76,14 @@ class S3ImageFolder(Dataset):
             raise RuntimeError(f"Error loading image at index {idx}: {str(e)}")
 
         return img, self.class_to_idx[label]
-
-def get_data(batch_size, img_root, seed = None, split_data = False, transform = None):
-
+    
+def get_data(batch_size, img_root:str, seed = None, split_data = False, transform:torchvision.transforms.Compose = None):
+    """
+    Function to get data in a torch DataLoader.
+    ---
+    split_data (bool): if True, then data is split into train, val and test and three data loaders are returned
+    transform (torchvision.transforms.Compose): a pipeline of transformation to apply when iterating over the data loaders
+    """
     # Load data
     data = S3ImageFolder(root=img_root, transform=transform)
 
@@ -91,5 +104,6 @@ def get_data(batch_size, img_root, seed = None, split_data = False, transform = 
 
         return train_loader, val_loader, test_loader
         
-    data_loader = torch.utils.data.DataLoader(data, batch_size, shuffle=False, num_workers=4)    
+    data_loader = torch.utils.data.DataLoader(data, batch_size, shuffle=False, num_workers=4)
+        
     return data_loader

@@ -46,16 +46,49 @@ Paper: [(M. Zhang, S. Levine, C. Finn, 2022)](https://proceedings.neurips.cc/pap
 
 <br>
 
-## Methods to Implement 
 
-<br>
-
-- **Synthetic Image Generation (CLIP + MEMO + Stable Diffusion)**: Traditional data augmentation methods are limited by insufficient data diversity. We re-adapt the DiffTPT method proposed by [(C. Feng, K. Yu, 2023)](https://ieeexplore.ieee.org/document/10376616/) to use it with MEMO. Specifically, we use a pre-trained diffusion model (Stable Diffusion) to generate diverse and informative new data. To avoid using misleading pictures, we use their cosine similarity-based filtration technique to select the generated data with higher similarity to the single test sample. Augmented data by both conventional method and pre-trained stable diffusion is incorporated, but with different percentages. The CLIP image encoder is used to select and produce the most similar generated images.
+- **Efficient DiffTPT**: Traditional data augmentation methods are limited by insufficient data diversity. We re-adapt the DiffTPT method proposed by [(C. Feng, K. Yu, 2023)](https://ieeexplore.ieee.org/document/10376616/) to use it with MEMO. 
 
 <p align="center">
-  <img src="images/DiffTPT_image_generation_selection.png" width="600" height="300"/>  
+  <img src="images/DiffTPT.png" width="800" height="300">  
 </p>
 
-- **Synthetic Image Generation (CLIP + MEMO + Stable Diffusion + llama)**: DiffTPT is able to further help in case of domain shift test time adaptation by providing more diverse images to tune the prompt used in CLIP or to update models used in MEMO. However, it relies on the CLIP Image encoder to generate new images which might limit such variability. Moreover, generating images at test time slows down online inference and requires to generate new images each time. For this reason we propose a new approach which consists of generating a set of prompts using an LLM for each class. This prompt will then be used to generate new images with stable diffusion. At test time, we still use the CLIP image encoder to retrieve the most similar augmentations, but in this case we compare the embedding of the original image with all the synthetic images produced in advance. This cost should be much lower than generating new images for each test sample and still provide an accuracy improvement. We first try to combine the stored synthetic data only with the conventional augmentations and then also with the ones produced on the fly using the approach of [(C. Feng, K. Yu, 2023)](https://ieeexplore.ieee.org/document/10376616/).
+However, DiffTPT relies on the CLIP image encoder to generate new images, which may limit the variability of the generated outputs. Additionally, generating images at test time slows down online inference and necessitates the creation of new images for each instance. To address these limitations, we propose a novel approach as follows:
+
+1. **Query Definition**: Formulate a query that includes the class name, image style, and other relevant details.
+
+2. **Image Scraping**: Using the query, scrape a small set of images from the internet for each class (e.g., 10 images per class). For domains with significant shifts or that are very abstract, incorporating these images empirically aids in generating samples more aligned with the new data distribution, though it may reduce variability and may erronously bias the generation if the scraping is not performed appropriately.
+
+3. **Prompt Generation**: Use a similar query and a large language model (LLM), specifically "llama3.1" in our case, to generate a set of prompts for each class. The CLIP text embeddings for these prompts are then stored.
+
+4. **Image Generation and Embedding Storage**: Generate new images using stable diffusion based on the prompts and/or scraped images, and store their corresponding CLIP image embeddings.
+
+5. **Cosine Similarity for Retrieval**: At test time, use cosine similarity between the image embeddings of the previously generated images and/or the text embeddings to retrieve the most similar images. This method is computationally less expensive than generating new images for each test sample and it should still enhance accuracy. For example, while our number of generated images is fixed and does not depend on the number of samples to classify, the original method scales linearly with it. Which means that for the `Imagenet-A`, assuming 64 augmentations per sample, one needs to produce a total of 480,000 images, nearly 50 times the ones we used. Thus, not only our method is much more efficient and expensive, but it's also significantly faster assuming the same computational power. 
+
+6. **Data Augmentation**: Augmented data is incorporated using both conventional methods and pre-trained stable diffusion models, albeit with varying percentages.
+
+For more details and the results of all the experiments check `notebook_report.ipynb`.
+
+<p align="center">
+  <img src="images/image_generation_pipeline_colored.jpg" width="600" height="300">  
+</p>
+
+## Final Pipeline 
+
+Using all the methods previously described, the final pipeline to make a prediction is the following: 
+
+<p align="center">
+  <img src="images/prediction_pipeline_colored.png" width="800" height="400">  
+</p>
+
+1. **Image Classification and Generation**: Given a sample image for classification, the `top_j` images, previously generated using a diffusion model and a LLM, are retrieved based on cosine similarity between `CLIP` image embeddings and possibly also the text embedding of the prompt used to generate the image. Details of this generation process are elaborated in subsequent sections.
+
+2. **Augmentation and Confidence Filtering**: `k` augmentations of the original image are generated, and the corresponding probability tensors are computed. An entropy-based confidence selection filter is then applied to identify the `top_aug` augmentations.
+
+3. **Marginal Output Distribution**: The probabilities of the generated images and the augmentations are combined, and the marginal output distribution is computed (refer to MEMO for more details).
+
+4. **Model Update**: The model is updated by minimizing the entropy of the marginal output distribution tensor. Multiple updates may occur, but the augmentations remain unchanged.
+
+5. **Final Prediction**: The updated model computes new probabilities on the previous augmentations (TTA). These are filtered again using the confidence selection mechanism, and the final prediction is obtained by applying `softmax` and `argmax` on the marginal output distribution. Note: Generated images are used only until the update step, with TTA performed exclusively on the augmentations.
 
 <br>

@@ -99,7 +99,7 @@ class Tester:
         ----------
         indices_in_1k: list of indices to map [B,1000] -> [B,200]
         """
-        imagenetA_masking_path = "/home/sagemaker-user/Domain-Shift-Computer-Vision/utility/data/imagenetA_masking.json"
+        imagenetA_masking_path = "Domain-Shift-Computer-Vision/utility/data/imagenetA_masking.json"
         with open(imagenetA_masking_path, 'r') as json_file:
             imagenetA_masking = json.load(json_file)
         indices_in_1k = [int(k) for k in imagenetA_masking if imagenetA_masking[k] != -1]
@@ -214,7 +214,7 @@ class Tester:
              verbose = True,
              log_interval = 1,
              MC = None,
-             gen_aug_settings = None):
+             gen_aug_settings = dict()):
         """
         Main function to test a torchvision model with different test-time adaptation techniques 
         and keep track of the results and the experiment setting. 
@@ -288,7 +288,7 @@ class Tester:
             imagenetA_masking = self.get_imagenetA_masking()
         
         if gen_aug_settings:
-            clip_model, preprocess = clip.load(gen_aug_settings["clip_img_encoder"])
+            clip_model, clip_preprocess = clip.load(gen_aug_settings["clip_img_encoder"])
         
         if prior_strength < 0:
             torch.nn.BatchNorm2d.prior_strength = 1
@@ -319,29 +319,29 @@ class Tester:
                         optimizer.load_state_dict(MEMO_checkpoint['optimizer'])
 
                     # get normalized augmentations
-                    start_time_augmentations = time.time()
-                    test_augmentations = self.get_test_augmentations(input, augmentations, num_augmentations, seed_augmentations)
-                    end_time_augmentations = time.time()
-                    time_dict["get_augmentations"] += (end_time_augmentations - start_time_augmentations)
-
-                    if gen_aug_settings:
-                        start_time_gen_augmentations = time.time()
-                        retrieved_gen_images = self.retrieve_generated_images(img = input, 
-                                                                              num_images = gen_aug_settings["num_img"], 
-                                                                              clip_model = clip_model, 
-                                                                              preprocess = preprocess, 
-                                                                              img_to_tensor_pipe = transform_loader, 
-                                                                              data_path = gen_aug_settings["gen_data_path"], 
-                                                                              use_t2i_similarity = gen_aug_settings["use_t2i_similarity"], 
-                                                                              t2i_images = gen_aug_settings["t2i_img"], 
-                                                                              i2i_images = gen_aug_settings["i2i_img"],
-                                                                              threshold = gen_aug_settings["threshold"])
-                        if retrieved_gen_images:
-                            test_augmentations = torch.cat([test_augmentations,retrieved_gen_images],dim=0)
-                        end_time_gen_augmentations = time.time()
-                        time_dict["get_gen_images"] += (end_time_gen_augmentations - start_time_gen_augmentations)
+                    with torch.no_grad():
+                        start_time_augmentations = time.time()
+                        test_augmentations = self.get_test_augmentations(input, augmentations, num_augmentations, seed_augmentations)
+                        end_time_augmentations = time.time()
+                        time_dict["get_augmentations"] += (end_time_augmentations - start_time_augmentations)
+                        test_augmentations = test_augmentations.to(self.__device)
                         
-                    test_augmentations = test_augmentations.to(self.__device)
+                        if gen_aug_settings:
+                            start_time_gen_augmentations = time.time()
+                            retrieved_gen_images = self.retrieve_generated_images(img = input, 
+                                                                                  num_images = gen_aug_settings["num_img"], 
+                                                                                  clip_model = clip_model, 
+                                                                                  clip_preprocess = clip_preprocess,
+                                                                                  img_to_tensor_pipe = transform_loader, 
+                                                                                  data_path = gen_aug_settings["gen_data_path"], 
+                                                                                  use_t2i_similarity =gen_aug_settings["use_t2i_similarity"], 
+                                                                                  t2i_images = gen_aug_settings["t2i_img"], 
+                                                                                  i2i_images = gen_aug_settings["i2i_img"],
+                                                                                  threshold = gen_aug_settings["threshold"])
+                            if len(retrieved_gen_images):
+                                retrieved_gen_images = retrieved_gen_images.to(self.__device)
+                            end_time_gen_augmentations = time.time()
+                            time_dict["get_gen_images"] += (end_time_gen_augmentations - start_time_gen_augmentations)                        
                     
                     for _ in range(num_adaptation_steps):
                         logits = model(test_augmentations)
@@ -358,6 +358,13 @@ class Tester:
                             probab_augmentations = self.get_best_augmentations(probab_augmentations, top_augmentations)
                             end_time_confidence_selection = time.time()
                             time_dict["confidence_selection"] += (end_time_confidence_selection - start_time_confidence_selection)
+
+                        if len(retrieved_gen_images):
+                            gen_images_logits = model(retrieved_gen_images)
+                            if dataset == "imagenetA":
+                                gen_images_logits = gen_images_logits[:, imagenetA_masking]
+                            probab_gen_augmentations = F.softmax(gen_images_logits - gen_images_logits.max(dim=1)[0][:, None], dim=1)
+                            probab_augmentations = torch.cat([probab_augmentations,probab_gen_augmentations],dim=0)
 
                         if MEMO:
                             start_time_memo_update = time.time()
@@ -401,6 +408,7 @@ class Tester:
         accuracy = cumulative_accuracy / samples * 100
         time_dict["total_time"] += sum(time_dict.values())
 
+        # save information to reproduce the experiment
         self.save_result(accuracy = accuracy,
                          path_result = path_result,
                          seed_augmentations = seed_augmentations,

@@ -1,4 +1,3 @@
-import torch
 import torch.nn as nn
 import torchvision.models as models
 
@@ -19,7 +18,7 @@ class ResNet50Dropout(nn.Module):
         self._add_dropout()
 
     def get_dropout_positions(self):
-        dropout_positions_path = "/home/sagemaker-user/Domain-Shift-Computer-Vision/utility/data/dropout_positions.json"
+        dropout_positions_path = "Domain-Shift-Computer-Vision/utility/data/dropout_positions.json"
         with open(dropout_positions_path, 'r') as json_file:
             dropout_positions = json.load(json_file)
         dropout_positions = dropout_positions["dropout_positions"]

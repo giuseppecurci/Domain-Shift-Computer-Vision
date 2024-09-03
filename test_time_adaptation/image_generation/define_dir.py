@@ -9,7 +9,7 @@ def get_imagenetA_classes():
     ----------
     indices_in_1k: list of indices to map [B,1000] -> [B,200]
     """
-    imagenetA_classes_path = "/home/sagemaker-user/Domain-Shift-Computer-Vision/utility/data/imagenetA_classes.json"
+    imagenetA_classes_path = "Domain-Shift-Computer-Vision/utility/data/imagenetA_classes.json"
     imagenetA_classes_dict = None
     with open(imagenetA_classes_path, 'r') as json_file:
         imagenetA_classes_dict = json.load(json_file)
